@@ -10,13 +10,12 @@ const HISTORY_KEY = 'psy_history_v1';
 const DEFAULT_ESSAY_MIN = 30;
 const DEFAULT_SECTION_MIN = 20;
 const WARN_MS = 5 * 60 * 1000;
-const READ_LINE = 0.4; // which height of the screen counts as "the question being read"
+const SCROLL_TO = 0.2; // where a question lands on screen when jumping to it from the answer bar
 
 let state = null;     // persisted
 let pdfDoc = null;    // loaded pdf.js document
 let tickTimer = null;
 let lastTick = 0;
-let activeQ = null;   // {s, q} or {s, other:true}
 let selectedQ = 0;    // question shown in the bottom answer row
 
 // ---------- storage ----------
@@ -395,7 +394,8 @@ function renderSetup() {
         <li>הפרקים מוצגים לפי הסדר. שעון לא מוצג. כשנשארות 5 דקות תקפוץ הודעה קטנה.</li>
         <li>כשהזמן נגמר, הפרק ננעל והבא מתחיל אוטומטית. אי אפשר לחזור לפרק קודם.</li>
         <li>מסמנים תשובה בעיגולים שליד כל שאלה או בסרגל שלמטה. לחיצה נוספת על אותה תשובה מוחקת אותה.</li>
-        <li>הזמן נמדד לפי השאלה שנמצאת בגובה הקריאה במסך.</li>
+        <li>כל השאלות מוצגות באפור. לוחצים על שאלה כדי להתחיל לספור לה זמן, וכשעוברים לשאלה אחרת הקודמת חוזרת לאפור. לחיצה על קטע קריאה סופרת זמן קטע.</li>
+        <li>אם סימנת תשובה לשאלה בלי ללחוץ עליה קודם, הזמן מאז הפעולה הקודמת נזקף לה.</li>
       </ul>
     </div>
     <div class="row">
@@ -457,7 +457,8 @@ async function renderExam() {
   const isEssay = idx === -1;
   const sec = isEssay ? null : state.sections[idx];
   selectedQ = 1;
-  activeQ = null;
+  if (!isEssay && (!state.active || state.active.s !== idx)) { state.active = { s: idx, key: 'none' }; state.pend = {}; save(); }
+  if (!isEssay && /^\d+$/.test(state.active.key)) selectedQ = +state.active.key;
 
   const el = h(`
   <div class="exam">
@@ -488,6 +489,8 @@ async function renderExam() {
       box.innerHTML = ''; box.appendChild(c);
       if (!isEssay) placeInline(pn, pageEls[pn], c);
     }
+    // after a reload, return to the question that was active
+    if (!isEssay && sec.inlineOk && /^\d+$/.test(activeKey())) selectQ(+activeKey(), true);
   })();
 
   if (isEssay) {
@@ -503,7 +506,6 @@ async function renderExam() {
   // ticking: time accounting + warnings + auto advance
   lastTick = Date.now();
   tickTimer = setInterval(() => tick(booklet), 500);
-  booklet.onscroll = () => { if (!isEssay) updateActive(booklet); };
   window.onresize = null;
 }
 
@@ -513,16 +515,40 @@ function placeInline(pn, wrap, canvas) {
   const side = wrap.querySelector('.side');
   const hpx = parseFloat(canvas.style.width) * canvas.height / canvas.width;
   side.style.height = hpx + 'px';
+  const box = wrap.querySelector('.pagebox');
   sec.questions.forEach((q, i) => {
     if (q.page !== pn) return;
     const qn = i + 1;
+    const shade = h(`<div class="qshade" data-q="${qn}"></div>`);
+    shade.style.top = (q.top * 100) + '%';
+    shade.style.height = ((q.bottom - q.top) * 100) + '%';
+    box.appendChild(shade);
     const g = h(`<div class="bubbles" data-q="${qn}"><span class="qn">${qn}</span>${[1, 2, 3, 4].map(a => `<button data-a="${a}">${a}</button>`).join('')}</div>`);
     g.style.top = (q.ny * hpx - 6) + 'px';
     g.querySelectorAll('button').forEach(b => b.onclick = () => setAnswer(qn, +b.dataset.a));
     side.appendChild(g);
   });
+  // a click anywhere on the page activates the question under it (or the passage/instructions)
+  box.onclick = (e) => {
+    const r = box.getBoundingClientRect();
+    const y = (e.clientY - r.top) / r.height;
+    const i = sec.questions.findIndex(q => q.page === pn && y >= q.top && y <= q.bottom);
+    activate(i >= 0 ? String(i + 1) : 'passage');
+  };
   refreshMarks();
-  updateActive(document.getElementById('booklet'));
+}
+
+// Only one thing is "active" at a time; its time runs. pend = time since the last activation/answer.
+function activate(key) {
+  const idx = state.current;
+  if (state.phase !== 'section') return;
+  if (/^\d+$/.test(key)) selectedQ = +key;
+  if (state.active && state.active.s === idx && state.active.key === key) { refreshMarks(); return; }
+  state.active = { s: idx, key };
+  state.pend = {};
+  state.log.push({ t: Date.now(), s: idx, type: 'activate', key });
+  save();
+  refreshMarks();
 }
 
 function drawBar(bar, sec, idx) {
@@ -531,7 +557,7 @@ function drawBar(bar, sec, idx) {
     <div class="grid">${Array.from({ length: sec.count }, (_, i) => `<button class="cell" data-q="${i + 1}"><span class="n">${i + 1}</span><span class="a"></span></button>`).join('')}</div>
     <div class="current"><span class="cur-label"></span>${[1, 2, 3, 4].map(a => `<button class="ans" data-a="${a}">${a}</button>`).join('')}</div>
     <button class="btn small" id="finish">סיום פרק</button>`;
-  bar.querySelectorAll('.cell').forEach(c => c.onclick = () => { selectQ(+c.dataset.q, true); });
+  bar.querySelectorAll('.cell').forEach(c => c.onclick = () => { selectQ(+c.dataset.q, true); activate(c.dataset.q); });
   bar.querySelectorAll('.ans').forEach(b => b.onclick = () => setAnswer(selectedQ, +b.dataset.a));
   refreshMarks();
 }
@@ -544,7 +570,7 @@ function selectQ(q, scroll) {
     const box = document.querySelector(`.pagebox[data-page="${qq.page}"]`);
     const booklet = document.getElementById('booklet');
     if (box) {
-      const target = box.offsetTop + qq.top * box.offsetHeight - booklet.clientHeight * READ_LINE + 20;
+      const target = box.offsetTop + qq.top * box.offsetHeight - booklet.clientHeight * SCROLL_TO;
       booklet.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
     }
   }
@@ -558,7 +584,19 @@ function setAnswer(q, a) {
   const prev = ans[q] || null;
   const next = prev === a ? null : a;
   if (next) ans[q] = next; else delete ans[q];
-  state.log.push({ t: Date.now(), s: idx, q, a: next, prev });
+  const now = Date.now();
+  const key = String(q);
+  // answered without clicking the question first: the time since the last activation/answer belongs to it
+  if (!state.active || state.active.s !== idx || state.active.key !== key) {
+    const qt = state.qtime[idx] || (state.qtime[idx] = {});
+    let moved = 0;
+    for (const [k, ms] of Object.entries(state.pend || {})) { qt[k] = Math.max(0, (qt[k] || 0) - ms); moved += ms; }
+    qt[key] = (qt[key] || 0) + moved;
+    state.log.push({ t: now, s: idx, type: 'auto', key, ms: moved });
+    state.active = { s: idx, key };
+  }
+  state.pend = {};
+  state.log.push({ t: now, s: idx, q, a: next, prev });
   selectedQ = q;
   save();
   refreshMarks();
@@ -571,8 +609,9 @@ function refreshMarks() {
   document.querySelectorAll('.bubbles').forEach(g => {
     const q = +g.dataset.q;
     g.querySelectorAll('button').forEach(b => b.classList.toggle('on', ans[q] === +b.dataset.a));
-    g.classList.toggle('active', activeQ && activeQ.q === q);
+    g.classList.toggle('active', activeKey() === String(q));
   });
+  document.querySelectorAll('.qshade').forEach(sh => sh.classList.toggle('on', activeKey() === sh.dataset.q));
   document.querySelectorAll('.answerbar .cell').forEach(c => {
     const q = +c.dataset.q;
     c.querySelector('.a').textContent = ans[q] || '';
@@ -584,23 +623,8 @@ function refreshMarks() {
   document.querySelectorAll('.answerbar .ans').forEach(b => b.classList.toggle('on', ans[selectedQ] === +b.dataset.a));
 }
 
-function updateActive(booklet) {
-  const idx = state.current;
-  if (idx == null || idx < 0) return;
-  const sec = state.sections[idx];
-  if (!sec.inlineOk) { activeQ = { q: selectedQ }; return; }
-  const line = booklet.scrollTop + booklet.clientHeight * READ_LINE;
-  let found = null;
-  sec.questions.forEach((q, i) => {
-    const box = booklet.querySelector(`.pagebox[data-page="${q.page}"]`);
-    if (!box) return;
-    const t = box.offsetTop + q.top * box.offsetHeight, b = box.offsetTop + q.bottom * box.offsetHeight;
-    if (line >= t && line <= b) found = i + 1;
-  });
-  const prev = activeQ && activeQ.q;
-  activeQ = found ? { q: found } : { other: true };
-  if (found && found !== prev) selectedQ = found;
-  if ((activeQ.q || null) !== (prev || null)) refreshMarks();
+function activeKey() {
+  return state.active && state.active.s === state.current ? state.active.key : 'none';
 }
 
 function tick(booklet) {
@@ -608,11 +632,12 @@ function tick(booklet) {
   const dt = now - lastTick; lastTick = now;
   if (state.phase === 'section') {
     const idx = state.current;
-    const sec = state.sections[idx];
-    if (!sec.inlineOk) activeQ = { q: selectedQ };
-    const key = activeQ && activeQ.q ? String(activeQ.q) : 'other';
+    const key = activeKey();
+    const d = Math.min(dt, 5000);
     const qt = state.qtime[idx] || (state.qtime[idx] = {});
-    qt[key] = (qt[key] || 0) + Math.min(dt, 5000);
+    qt[key] = (qt[key] || 0) + d;
+    const pend = state.pend || (state.pend = {});
+    pend[key] = (pend[key] || 0) + d;
   }
   if (!state.warned && state.phaseEnd - now <= WARN_MS && state.phaseEnd - now > 0) {
     state.warned = true; save();
@@ -635,7 +660,7 @@ function buildReport(st) {
     const ans = st.answers[i] || {};
     const qt = st.qtime[i] || {};
     const ph = st.phases.find(p => p.idx === i);
-    const evs = st.log.filter(e => e.s === i);
+    const evs = st.log.filter(e => e.s === i && e.q);
     const qs = Array.from({ length: s.count }, (_, k) => {
       const q = k + 1;
       const my = evs.filter(e => e.q === q);
@@ -646,14 +671,16 @@ function buildReport(st) {
         changes: Math.max(0, my.length - 1),
         firstAnswerSec: my.length && ph ? Math.round((my[0].t - ph.start) / 1000) : null,
         lastAnswerSec: my.length && ph ? Math.round((my[my.length - 1].t - ph.start) / 1000) : null,
+        autoAssignedSec: Math.round(st.log.filter(e => e.s === i && e.type === 'auto' && e.key === String(q)).reduce((a, e) => a + e.ms, 0) / 1000),
       };
     });
     return {
       num: s.num, domain: s.domain, pilot: s.pilot, minutes: s.minutes,
       timeUsedSec: ph && ph.end ? Math.round((ph.end - ph.start) / 1000) : null,
       endedBy: ph ? ph.endedBy : null,
-      otherTimeSec: Math.round((qt.other || 0) / 1000),
-      timeMeasured: s.inlineOk ? 'by-scroll' : 'by-selected-question',
+      passageTimeSec: Math.round((qt.passage || 0) / 1000),
+      unassignedTimeSec: Math.round(((qt.none || 0) + (qt.other || 0)) / 1000),
+      timeMeasured: 'by-click',
       correct: scores.per[i].correct, total: s.count, answered: scores.per[i].answered,
       questions: qs,
     };
@@ -664,7 +691,7 @@ function buildReport(st) {
     essay: essayPh ? { minutes: st.essay.minutes, timeUsedSec: essayPh.end ? Math.round((essayPh.end - essayPh.start) / 1000) : null } : null,
     scores: scores.complete ? { vRaw: scores.vRaw, qRaw: scores.qRaw, V: scores.V, Q: scores.Q, two: scores.two, verbalEmphasis: scores.verbalW, quantEmphasis: scores.quantW, percentBelow: scores.pct.below } : null,
     sections,
-    notes: 'timeSec = זמן שהשאלה הייתה בגובה הקריאה במסך. otherTimeSec = זמן על קטעי קריאה/הוראות. פרק פיילוט לא נכלל בציון.',
+    notes: 'timeSec = זמן שהשאלה הייתה פעילה (נלחצה). autoAssignedSec = זמן שנזקף לשאלה כי סומנה בלי שנלחצה קודם. passageTimeSec = זמן על קטעי קריאה/הוראות. unassignedTimeSec = זמן בלי שאלה פעילה. פרק פיילוט לא נכלל בציון.',
   };
 }
 
@@ -725,15 +752,16 @@ function renderReview() {
         <span>ללא תשובה: <b>${s.total - s.answered}</b></span>
         <span>זמן בפועל: <b>${s.timeUsedSec != null ? fmt(s.timeUsedSec * 1000) : '—'}</b> מתוך ${s.minutes}:00 ${s.endedBy === 'user' ? '(סיימת מוקדם)' : ''}</span>
         <span>ממוצע לשאלה נכונה: <b>${fmt(avgOk * 1000)}</b> · לשאלה שגויה: <b>${fmt(avgBad * 1000)}</b></span>
-        ${s.otherTimeSec > 5 ? `<span>קטעי קריאה/הוראות: <b>${fmt(s.otherTimeSec * 1000)}</b></span>` : ''}
+        ${s.passageTimeSec > 5 ? `<span>קטעי קריאה/הוראות: <b>${fmt(s.passageTimeSec * 1000)}</b></span>` : ''}
+        ${s.unassignedTimeSec > 5 ? `<span>לא משויך: <b>${fmt(s.unassignedTimeSec * 1000)}</b></span>` : ''}
         <span>האיטיות ביותר: <b>${slow.join(', ')}</b></span>
       </div>
       <table class="qtable"><thead><tr><th>#</th><th>שלי</th><th>נכונה</th><th></th><th>זמן</th><th class="barcol"></th><th>שינויים</th></tr></thead><tbody>
       ${s.questions.map(q => `<tr class="${q.isCorrect == null ? '' : !q.answer ? 'blank' : q.isCorrect ? 'right' : 'wrong'}" data-s="${i}" data-q="${q.q}">
         <td>${q.q}</td><td>${q.answer ?? '—'}</td><td>${q.correct ?? '?'}</td><td>${q.isCorrect == null ? '' : !q.answer ? 'ללא' : q.isCorrect ? '✓' : '✗'}</td>
-        <td>${fmt(q.timeSec * 1000)}</td><td class="barcol"><div class="tbar" style="width:${Math.round(100 * q.timeSec / maxT)}%"></div></td><td>${q.changes || ''}</td></tr>`).join('')}
+        <td>${fmt(q.timeSec * 1000)}${q.autoAssignedSec ? '<span class="auto" title="נזקף אוטומטית: סומנה בלי לחיצה">*</span>' : ''}</td><td class="barcol"><div class="tbar" style="width:${Math.round(100 * q.timeSec / maxT)}%"></div></td><td>${q.changes || ''}</td></tr>`).join('')}
       </tbody></table>
-      ${st.sections[i].inlineOk ? '<div class="small muted">לחץ על שורה כדי לראות את השאלה.</div>' : '<div class="small muted">בפרק הזה הזמן נמדד לפי השאלה שנבחרה בסרגל.</div>'}
+      <div class="small muted">${st.sections[i].inlineOk ? 'לחץ על שורה כדי לראות את השאלה. ' : ''}* = זמן שנזקף לשאלה כי סומנה בלי שנלחצה קודם.</div>
     </section>`;
   });
   el.innerHTML = html;

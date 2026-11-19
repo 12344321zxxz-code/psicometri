@@ -47,9 +47,12 @@ body.in-exam { overflow: hidden; background: #e9e9e6; }
 .side { position: relative; width: 150px; flex: none; }
 .pagebox { background: var(--paper); box-shadow: 0 1px 4px rgba(0,0,0,.18); min-height: 400px; position: relative; }
 .pagebox canvas { display: block; }
+.qshade { position: absolute; left: 0; right: 0; background: rgba(105,105,112,.17); cursor: pointer; }
+.qshade:hover { background: rgba(105,105,112,.11); }
+.qshade.on { background: transparent; box-shadow: inset -4px 0 0 var(--accent); cursor: default; }
 .loading { padding: 40px; color: var(--muted); text-align: center; }
 
-.bubbles { position: absolute; right: 6px; display: flex; align-items: center; gap: 4px; padding: 3px 5px; border-radius: 16px; transition: background .15s; }
+.bubbles { position: absolute; right: 6px; display: flex; align-items: center; gap: 4px; padding: 3px 5px; border-radius: 16px; }
 .bubbles.active { background: var(--accent-soft); }
 .bubbles .qn { font-size: 12px; color: var(--muted); width: 18px; text-align: center; }
 .bubbles button { width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid #8a8a90; background: #fff; font-size: 13px; cursor: pointer; padding: 0; font-family: inherit; color: var(--ink); }
@@ -93,6 +96,7 @@ body.in-exam { overflow: hidden; background: #e9e9e6; }
 .qtable tr.wrong td:nth-child(4) { color: var(--bad); font-weight: bold; }
 .qtable tr.wrong { background: #fff6f5; }
 .qtable tr.blank td:nth-child(4) { color: var(--muted); }
+.auto { color: var(--warn); margin-inline-start: 2px; font-weight: bold; }
 .barcol { width: 30%; }
 .tbar { height: 8px; background: #9fb6d6; border-radius: 4px; }
 .keybox { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 14px 0; }
