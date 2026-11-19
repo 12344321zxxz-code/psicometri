@@ -17,6 +17,11 @@ let pdfDoc = null;    // loaded pdf.js document
 let tickTimer = null;
 let lastTick = 0;
 let selectedQ = 0;    // question shown in the bottom answer row
+let renderGen = 0;    // bumps on every screen change, so stale async page rendering stops
+let busy = false;     // a file is being processed
+let lockedOut = false; // the exam was changed from another tab
+const TAB_ID = Math.random().toString(36).slice(2);
+const safeName = (s) => String(s).replace(/[\\/:*?"<>|]+/g, '_').slice(0, 60);
 
 // ---------- storage ----------
 function save() { if (state) localStorage.setItem(STATE_KEY, JSON.stringify(state)); }
@@ -48,7 +53,7 @@ async function delPdf(id) {
 // ---------- helpers ----------
 const h = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const rng = (lo, hi) => `<span dir="ltr">${lo}–${hi}</span>`;
+const rng = (lo, hi) => lo === hi ? `${lo}` : `<span dir="ltr">${lo}–${hi}</span>`;
 const fmt = (ms) => { const s = Math.round(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const domainName = (d) => ({ quant: 'חשיבה כמותית', verbal: 'חשיבה מילולית', english: 'אנגלית' }[d] || 'פרק');
 
@@ -85,7 +90,7 @@ async function pageText(page) {
 
 function classify(t) {
   const hd = t.header;
-  const blank = /עמוד ריק/.test(t.body) || /טיוטה/.test(t.body);
+  const blank = t.body.length < 40 && (/עמוד ריק/.test(t.body) || /טיוטה/.test(t.body));
   if (/פתרונות/.test(hd)) return { kind: 'solutions' };
   if (/מפתח תשובות/.test(hd)) return { kind: 'key' };
   if (/חישוב אומדן/.test(hd)) return { kind: 'scoring' };
@@ -101,6 +106,7 @@ function classify(t) {
 // Answer key: rows of question numbers followed by rows of answers (1-4), grouped under "פרק N" lines.
 function parseKey(pagesText) {
   const blocks = [];
+  let cur = null;
   for (const t of pagesText) {
     const lines = [];
     for (const it of t.items) {
@@ -109,7 +115,6 @@ function parseKey(pagesText) {
       L.items.push(it);
     }
     lines.sort((a, b) => b.y - a.y);
-    let cur = null;
     for (let i = 0; i < lines.length; i++) {
       const L = lines[i];
       const txt = L.items.map(x => x.s).join(' ');
@@ -304,7 +309,9 @@ function computeScores(st) {
 
 // ---------- screens ----------
 function render() {
+  renderGen++;
   clearInterval(tickTimer); tickTimer = null;
+  if (lockedOut) return renderLocked();
   document.body.classList.remove('in-exam');
   if (!state || state.phase === 'setup') return state ? renderSetup() : renderHome();
   if (state.phase === 'done') return renderReview();
@@ -332,7 +339,7 @@ function renderHome() {
   </div>`);
   $app.innerHTML = ''; $app.appendChild(el);
   const input = el.querySelector('#file');
-  input.onchange = () => input.files[0] && startUpload(input.files[0]);
+  input.onchange = () => { const f = input.files[0]; input.value = ''; if (f) startUpload(f); };
   const drop = el.querySelector('#drop');
   drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
   drop.ondragleave = () => drop.classList.remove('over');
@@ -344,12 +351,15 @@ function renderHome() {
 }
 
 async function startUpload(file) {
+  if (busy) return;
+  busy = true;
   const prog = document.getElementById('progress'), err = document.getElementById('err');
   err.classList.add('hidden'); prog.classList.remove('hidden');
   const bar = prog.querySelector('.bar');
   try {
     const buf = await file.arrayBuffer();
-    pdfDoc = await pdfjs.getDocument({ data: buf.slice(0) }).promise;
+    try { pdfDoc = await pdfjs.getDocument({ data: buf.slice(0) }).promise; }
+    catch (e) { throw new Error(e && e.name === 'PasswordException' ? 'הקובץ מוגן בסיסמה. צריך גרסה בלי סיסמה.' : 'זה לא קובץ PDF תקין.'); }
     const res = await analyzeExam(p => { bar.style.width = Math.round(p * 100) + '%'; });
     const id = 'x' + Date.now();
     await putPdf(id, buf);
@@ -366,6 +376,9 @@ async function startUpload(file) {
     prog.classList.add('hidden');
     err.textContent = e.message || 'שגיאה בקריאת הקובץ';
     err.classList.remove('hidden');
+    pdfDoc = null;
+  } finally {
+    busy = false;
   }
 }
 
@@ -420,7 +433,7 @@ function beginPhase(idx, start) {
   state.current = idx;
   state.phaseStart = start;
   state.phaseEnd = start + phaseMinutes(idx) * 60000;
-  state.warned = false;
+  state.warned = phaseMinutes(idx) * 60000 <= WARN_MS; // no "5 minutes left" for a phase that short
   state.phases.push({ idx, start, end: null, endedBy: null });
   if (idx >= 0 && !state.qtime[idx]) state.qtime[idx] = {};
   save();
@@ -441,9 +454,9 @@ function endPhase(at, by) {
 }
 // catch up after a reload / closed tab: time keeps running like a real exam
 function catchUp() {
-  let moved = false;
+  let moved = 0;
   while ((state.phase === 'essay' || state.phase === 'section') && Date.now() >= state.phaseEnd) {
-    moved = true;
+    moved++;
     if (!endPhase(state.phaseEnd, 'time')) break;
   }
   return moved;
@@ -451,7 +464,12 @@ function catchUp() {
 
 // ---------- exam screen ----------
 async function renderExam() {
-  if (catchUp()) { render(); return; }
+  const skipped = catchUp();
+  if (skipped) {
+    toast(skipped === 1 ? 'הזמן של הפרק נגמר בזמן שהדף לא היה פתוח. עוברים לבא.' : `${skipped} פרקים נגמרו בזמן שהדף לא היה פתוח.`, 7000);
+    render(); return;
+  }
+  const gen = renderGen;
   document.body.classList.add('in-exam');
   const idx = state.current;
   const isEssay = idx === -1;
@@ -470,7 +488,8 @@ async function renderExam() {
   const bar = el.querySelector('#answerbar');
 
   const pages = isEssay ? state.essay.pages : sec.pages;
-  const width = Math.min(900, booklet.clientWidth - (isEssay ? 24 : 170));
+  const narrow = window.innerWidth <= 760; // side column with bubbles is hidden on phones
+  const width = Math.max(280, Math.min(900, booklet.clientWidth - (isEssay || narrow ? 12 : 170)));
   const pageEls = {};
   for (const pn of pages) {
     const wrap = h(`<div class="pagewrap"><div class="side"></div><div class="pagebox" data-page="${pn}"><div class="loading">טוען…</div></div></div>`);
@@ -484,10 +503,11 @@ async function renderExam() {
   (async () => {
     for (const pn of pages) {
       const c = await renderPageCanvas(pn, Math.round(width * dpr));
+      if (gen !== renderGen) return; // screen changed while rendering
       c.style.width = width + 'px';
       const box = pageEls[pn].querySelector('.pagebox');
       box.innerHTML = ''; box.appendChild(c);
-      if (!isEssay) placeInline(pn, pageEls[pn], c);
+      if (!isEssay) placeInline(sec, pn, pageEls[pn], c);
     }
     // after a reload, return to the question that was active
     if (!isEssay && sec.inlineOk && /^\d+$/.test(activeKey())) selectQ(+activeKey(), true);
@@ -500,17 +520,20 @@ async function renderExam() {
   }
   bar.querySelector('#finish').onclick = () => {
     if (!confirm(isEssay ? 'לעבור לפרק הראשון? לא תוכל לחזור למטלת הכתיבה.' : 'לסיים את הפרק? לא תוכל לחזור אליו.')) return;
-    endPhase(Date.now(), 'user'); render();
+    if (gen !== renderGen || state.phase === 'done') return; // the phase already ended while the dialog was open
+    const now = Date.now();
+    if (now >= state.phaseEnd) endPhase(state.phaseEnd, 'time'); else endPhase(now, 'user');
+    render();
   };
 
   // ticking: time accounting + warnings + auto advance
   lastTick = Date.now();
+  state.owner = TAB_ID; save(); // claim the exam: another open tab sees this write and steps aside
   tickTimer = setInterval(() => tick(booklet), 500);
   window.onresize = null;
 }
 
-function placeInline(pn, wrap, canvas) {
-  const idx = state.current, sec = state.sections[idx];
+function placeInline(sec, pn, wrap, canvas) {
   if (!sec.inlineOk) return;
   const side = wrap.querySelector('.side');
   const hpx = parseFloat(canvas.style.width) * canvas.height / canvas.width;
@@ -587,10 +610,13 @@ function setAnswer(q, a) {
   const now = Date.now();
   const key = String(q);
   // answered without clicking the question first: the time since the last activation/answer belongs to it
-  if (!state.active || state.active.s !== idx || state.active.key !== key) {
+  if (next && (!state.active || state.active.s !== idx || state.active.key !== key)) {
     const qt = state.qtime[idx] || (state.qtime[idx] = {});
     let moved = 0;
-    for (const [k, ms] of Object.entries(state.pend || {})) { qt[k] = Math.max(0, (qt[k] || 0) - ms); moved += ms; }
+    for (const [k, ms] of Object.entries(state.pend || {})) {
+      if (k === 'passage') continue; // reading a passage you clicked on stays passage time
+      qt[k] = Math.max(0, (qt[k] || 0) - ms); moved += ms;
+    }
     qt[key] = (qt[key] || 0) + moved;
     state.log.push({ t: now, s: idx, type: 'auto', key, ms: moved });
     state.active = { s: idx, key };
@@ -628,16 +654,19 @@ function activeKey() {
 }
 
 function tick(booklet) {
+  if (lockedOut) return;
   const now = Date.now();
-  const dt = now - lastTick; lastTick = now;
-  if (state.phase === 'section') {
+  // count only time inside the phase; cap long gaps (laptop asleep) at a minute
+  const d = Math.max(0, Math.min(now, state.phaseEnd) - lastTick);
+  lastTick = now;
+  if (state.phase === 'section' && d > 0) {
     const idx = state.current;
     const key = activeKey();
-    const d = Math.min(dt, 5000);
+    const dd = Math.min(d, 65000);
     const qt = state.qtime[idx] || (state.qtime[idx] = {});
-    qt[key] = (qt[key] || 0) + d;
+    qt[key] = (qt[key] || 0) + dd;
     const pend = state.pend || (state.pend = {});
-    pend[key] = (pend[key] || 0) + d;
+    pend[key] = (pend[key] || 0) + dd;
   }
   if (!state.warned && state.phaseEnd - now <= WARN_MS && state.phaseEnd - now > 0) {
     state.warned = true; save();
@@ -723,6 +752,7 @@ function renderReview() {
       <div class="card"><div class="lbl">חשיבה כמותית</div><div class="big">${sc.Q}</div><div class="small muted">${sc.qRaw} נכונות (גלם)</div></div>
       <div class="card main"><div class="lbl">אומדן דו-תחומי</div><div class="big">${rng(sc.two.lo, sc.two.hi)}</div><div class="small muted">משוקלל ${sc.two.weighted} · כ-${sc.pct.below}% מהנבחנים מתחת לטווח</div></div>
     </div>
+    ${(() => { const cnt = (d) => st.sections.filter(x => x.domain === d && !x.pilot).length; return cnt('verbal') !== 2 || cnt('quant') !== 2 ? `<div class="warnbox">הציון מחושב לפי 2 פרקים מילוליים ו-2 כמותיים. כרגע נספרים ${cnt('verbal')} מילוליים ו-${cnt('quant')} כמותיים. סמן את פרק הפיילוט ליד שם הפרק.</div>` : ''; })()}
     <div class="small muted">דגש מילולי: ${rng(sc.verbalW.lo, sc.verbalW.hi)} · דגש כמותי: ${rng(sc.quantW.lo, sc.quantW.hi)}. האומדן מניח שהציון במטלת הכתיבה ברמה של החשיבה המילולית, כמו בהסבר שבקובץ הבחינה.</div>`;
   } else {
     html += `<div class="keybox"><b>חסר מפתח תשובות.</b> העלה את הקובץ עם המפתח, או הקלד אותו ידנית.
@@ -746,7 +776,8 @@ function renderReview() {
     const slow = [...s.questions].sort((a, b) => b.timeSec - a.timeSec).slice(0, 3).map(q => q.q);
     html += `
     <section class="sec-review">
-      <h2>פרק ${s.num} · ${domainName(s.domain)} ${s.pilot ? '<span class="tag">פיילוט · לא נכלל בציון</span>' : ''}</h2>
+      <h2>פרק ${s.num} · ${domainName(s.domain)} ${s.pilot ? '<span class="tag">פיילוט · לא נכלל בציון</span>' : ''}
+        <label class="pilot-toggle"><input type="checkbox" data-pilot="${i}" ${s.pilot ? 'checked' : ''}> פרק פיילוט</label></h2>
       <div class="sec-summary">
         <span><b>${s.correct}/${s.total}</b> נכונות</span>
         <span>ללא תשובה: <b>${s.total - s.answered}</b></span>
@@ -754,7 +785,7 @@ function renderReview() {
         <span>ממוצע לשאלה נכונה: <b>${fmt(avgOk * 1000)}</b> · לשאלה שגויה: <b>${fmt(avgBad * 1000)}</b></span>
         ${s.passageTimeSec > 5 ? `<span>קטעי קריאה/הוראות: <b>${fmt(s.passageTimeSec * 1000)}</b></span>` : ''}
         ${s.unassignedTimeSec > 5 ? `<span>לא משויך: <b>${fmt(s.unassignedTimeSec * 1000)}</b></span>` : ''}
-        <span>האיטיות ביותר: <b>${slow.join(', ')}</b></span>
+        ${maxT >= 5 ? `<span>האיטיות ביותר: <b>${slow.join(', ')}</b></span>` : ''}
       </div>
       <table class="qtable"><thead><tr><th>#</th><th>שלי</th><th>נכונה</th><th></th><th>זמן</th><th class="barcol"></th><th>שינויים</th></tr></thead><tbody>
       ${s.questions.map(q => `<tr class="${q.isCorrect == null ? '' : !q.answer ? 'blank' : q.isCorrect ? 'right' : 'wrong'}" data-s="${i}" data-q="${q.q}">
@@ -767,7 +798,7 @@ function renderReview() {
   el.innerHTML = html;
   $app.innerHTML = ''; $app.appendChild(el);
 
-  el.querySelector('#expJson').onclick = () => download(`tahkir-${esc(st.exam).slice(0, 40)}-${(st.finishedAt || '').slice(0, 10)}.json`, JSON.stringify(rep, null, 2));
+  el.querySelector('#expJson').onclick = () => download(`tahkir-${safeName(st.exam)}-${(st.finishedAt || '').slice(0, 10)}.json`, JSON.stringify(rep, null, 2));
   el.querySelector('#expCsv').onclick = () => download(`tahkir-${(st.finishedAt || '').slice(0, 10)}.csv`, toCSV(rep), 'text/csv');
   el.querySelector('#copy').onclick = async () => {
     const lines = [`סימולציה: ${st.exam} (${(st.finishedAt || '').slice(0, 10)})`];
@@ -779,6 +810,7 @@ function renderReview() {
     if (!confirm('להתחיל סימולציה חדשה? התחקור הזה כבר שמור בהיסטוריה.')) return;
     await delPdf(st.id); state = null; localStorage.removeItem(STATE_KEY); pdfDoc = null; render();
   };
+  el.querySelectorAll('[data-pilot]').forEach(cb => cb.onchange = () => { st.sections[+cb.dataset.pilot].pilot = cb.checked; save(); archive(); render(); });
   el.querySelectorAll('.qtable tr[data-q]').forEach(tr => tr.onclick = () => showQuestion(+tr.dataset.s, +tr.dataset.q));
 
   const kf = el.querySelector('#keyfile');
@@ -790,7 +822,7 @@ function renderReview() {
       for (let p = 1; p <= doc.numPages; p++) { const t = await pageText(await doc.getPage(p)); if (/מפתח תשובות/.test(t.header + ' ' + t.body)) texts.push(t); }
       const blocks = parseKey(texts);
       if (!blocks.length) { toast('לא נמצא מפתח תשובות בקובץ הזה'); return; }
-      st.sections.forEach(s => { const b = blocks.find(k => k.num === s.num); if (b) { s.key = b.key; s.pilot = b.pilot; } });
+      st.sections.forEach(s => { const b = blocks.find(k => k.num === s.num); if (b) { s.key = b.key; s.pilot = b.pilot; s.count = b.key.length; s.inlineOk = s.inlineOk && s.questions.length === s.count; } });
       save(); archive(); render();
     } catch (e) { toast('שגיאה בקריאת הקובץ'); }
   };
@@ -821,6 +853,28 @@ async function showQuestion(si, q) {
   box.appendChild(out);
   modal(box);
 }
+
+// ---------- other tabs / leaving the page ----------
+function renderLocked() {
+  document.body.classList.remove('in-exam');
+  $app.innerHTML = '';
+  $app.appendChild(h(`<div class="page"><h1>הבחינה פתוחה בלשונית אחרת</h1>
+    <p class="muted">כדי שהתשובות לא יידרסו, אפשר להמשיך רק בלשונית אחת. סגור את הלשונית הזאת, או לחץ כאן כדי להמשיך מכאן.</p>
+    <button class="btn" id="takeover">המשך בלשונית הזאת</button></div>`));
+  document.getElementById('takeover').onclick = () => location.reload();
+}
+window.addEventListener('storage', (e) => {
+  if (e.key !== STATE_KEY || lockedOut) return;
+  if (state && (state.phase === 'essay' || state.phase === 'section')) {
+    let other = null; try { other = JSON.parse(e.newValue); } catch {}
+    if (other && other.owner === TAB_ID) return;
+    lockedOut = true; render();
+  }
+  else { state = loadState(); if (!state) pdfDoc = null; boot(); }
+});
+const flush = () => { if (!lockedOut && state && (state.phase === 'essay' || state.phase === 'section')) save(); };
+window.addEventListener('pagehide', flush);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
 
 // ---------- boot ----------
 async function boot() {
