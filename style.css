@@ -113,3 +113,41 @@ body.in-exam { overflow: hidden; background: #e9e9e6; }
 @media (max-width: 640px) { .scorecards { grid-template-columns: 1fr; } }
 .pilot-toggle { font-size: 13px; font-weight: normal; color: var(--muted); margin-inline-start: 10px; cursor: pointer; }
 .warnbox { background: #fff3d6; color: #6b4500; border-radius: 10px; padding: 10px 14px; margin: 8px 0; font-size: 14px; }
+
+/* ----- review mode (reopened exam) ----- */
+.revbar { flex: none; display: flex; gap: 12px; align-items: center; background: var(--paper); border-bottom: 1px solid var(--line); padding: 8px 14px; flex-wrap: wrap; }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.tab { border: 1px solid var(--line); background: #fafafa; border-radius: 8px; padding: 6px 12px; font-family: inherit; font-size: 14px; cursor: pointer; }
+.tab.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tab.on .tag { background: #fff3d6; }
+.tabscore { font-weight: bold; margin-inline-start: 4px; }
+.side.rev { width: 170px; }
+.qshade.rev { cursor: default; }
+.qshade.rev.res-right { background: rgba(29,122,60,.07); box-shadow: inset -4px 0 0 rgba(29,122,60,.55); }
+.qshade.rev.res-wrong { background: rgba(179,38,30,.08); box-shadow: inset -4px 0 0 rgba(179,38,30,.6); }
+.qshade.rev.res-blank { background: rgba(105,105,112,.10); box-shadow: inset -4px 0 0 rgba(105,105,112,.5); }
+.qshade.rev:hover { filter: none; }
+.corner { display: none; position: absolute; top: 4px; left: 6px; font-size: 12px; font-weight: bold; padding: 2px 7px; border-radius: 10px; background: #fff; border: 1px solid var(--line); }
+.corner.res-right, .st.res-right { color: var(--ok); }
+.corner.res-wrong, .st.res-wrong { color: var(--bad); }
+.corner.res-blank, .st.res-blank { color: var(--muted); }
+.bubbles.rev { flex-wrap: wrap; width: 160px; background: #fff; border: 1px solid var(--line); border-radius: 12px; }
+.bubbles.rev .b { width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid #b5b5ba; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; color: var(--muted); }
+.bubbles.rev .b.correct { border-color: var(--ok); color: var(--ok); font-weight: bold; }
+.bubbles.rev .b.mine { background: var(--bad); border-color: var(--bad); color: #fff; }
+.bubbles.rev .b.mine.correct { background: var(--ok); border-color: var(--ok); color: #fff; }
+.bubbles.rev .meta { width: 100%; font-size: 12px; color: var(--muted); padding: 3px 2px 0; display: flex; justify-content: space-between; }
+.bubbles.rev .tm { font-weight: bold; color: var(--ink); direction: ltr; }
+.revisit .cell { height: 48px; }
+.revisit .cell .t { font-size: 9px; color: var(--muted); line-height: 1; direction: ltr; }
+.cell.res-right { background: #e6f4ea; border-color: #b7dfc3; }
+.cell.res-wrong { background: #fde8e6; border-color: #f2b8b2; }
+.cell.res-blank { background: #eee; }
+.reupload h2 { margin-top: 0; }
+.reupload .progress, .reupload .error { margin-top: 12px; }
+@media (max-width: 760px) {
+  .corner { display: inline-block; }
+  .revbar { padding: 6px; }
+  .tab { padding: 4px 8px; font-size: 12px; }
+  .tabdom { display: none; }
+}

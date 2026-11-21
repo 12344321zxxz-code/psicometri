@@ -19,6 +19,7 @@ let lastTick = 0;
 let selectedQ = 0;    // question shown in the bottom answer row
 let renderGen = 0;    // bumps on every screen change, so stale async page rendering stops
 let busy = false;     // a file is being processed
+let revisit = null;   // review-mode view: { rep, layout, doc, si, back }
 let lockedOut = false; // the exam was changed from another tab
 const TAB_ID = Math.random().toString(36).slice(2);
 const safeName = (s) => String(s).replace(/[\\/:*?"<>|]+/g, '_').slice(0, 60);
@@ -214,8 +215,8 @@ function detectQuestions(img, W, H) {
   return { nums, seps };
 }
 
-async function renderPageCanvas(pageNum, width) {
-  const page = await pdfDoc.getPage(pageNum);
+async function renderPageCanvas(pageNum, width, doc = pdfDoc) {
+  const page = await doc.getPage(pageNum);
   const v1 = page.getViewport({ scale: 1 });
   const vp = page.getViewport({ scale: width / v1.width });
   const c = document.createElement('canvas');
@@ -226,11 +227,11 @@ async function renderPageCanvas(pageNum, width) {
   return c;
 }
 
-async function analyzeExam(onProgress) {
-  const n = pdfDoc.numPages;
+async function analyzeExam(onProgress, doc = pdfDoc) {
+  const n = doc.numPages;
   const pages = [];
   for (let p = 1; p <= n; p++) {
-    const page = await pdfDoc.getPage(p);
+    const page = await doc.getPage(p);
     const t = await pageText(page);
     pages.push({ n: p, t, c: classify(t) });
   }
@@ -256,7 +257,7 @@ async function analyzeExam(onProgress) {
   for (const s of sections) {
     s.questions = [];
     for (const pn of s.pages) {
-      const c = await renderPageCanvas(pn, 827);
+      const c = await renderPageCanvas(pn, 827, doc);
       const W = c.width, H = c.height;
       const img = c.getContext('2d').getImageData(0, 0, W, H);
       const { nums, seps } = detectQuestions(img, W, H);
@@ -313,6 +314,7 @@ function render() {
   clearInterval(tickTimer); tickTimer = null;
   if (lockedOut) return renderLocked();
   document.body.classList.remove('in-exam');
+  if (revisit) return renderRevisit();
   if (!state || state.phase === 'setup') return state ? renderSetup() : renderHome();
   if (state.phase === 'done') return renderReview();
   return renderExam();
@@ -333,7 +335,7 @@ function renderHome() {
     <div id="err" class="error hidden"></div>
     ${hist.length ? `<h2>סימולציות קודמות</h2>
     <table class="hist"><thead><tr><th>תאריך</th><th>קובץ</th><th>V</th><th>Q</th><th>דו-תחומי</th><th></th></tr></thead><tbody>
-    ${hist.map((r, i) => `<tr><td>${new Date(r.finishedAt).toLocaleDateString('he-IL')}</td><td class="fname">${esc(r.exam)}</td><td>${r.scores?.V ?? '—'}</td><td>${r.scores?.Q ?? '—'}</td><td>${r.scores?.two ? rng(r.scores.two.lo, r.scores.two.hi) : '—'}</td><td><button class="link" data-exp="${i}">ייצוא</button> <button class="link danger" data-del="${i}">מחק</button></td></tr>`).join('')}
+    ${hist.map((r, i) => `<tr><td>${new Date(r.finishedAt).toLocaleDateString('he-IL')}</td><td class="fname">${esc(r.exam)}</td><td>${r.scores?.V ?? '—'}</td><td>${r.scores?.Q ?? '—'}</td><td>${r.scores?.two ? rng(r.scores.two.lo, r.scores.two.hi) : '—'}</td><td><button class="link" data-open="${i}">פתח מבחן</button> <button class="link" data-exp="${i}">ייצוא</button> <button class="link danger" data-del="${i}">מחק</button></td></tr>`).join('')}
     </tbody></table>
     <button class="btn secondary" id="expAll">ייצוא כל התחקורים (JSON)</button>` : ''}
   </div>`);
@@ -345,7 +347,13 @@ function renderHome() {
   drop.ondragleave = () => drop.classList.remove('over');
   drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); const f = e.dataTransfer.files[0]; if (f) startUpload(f); };
   el.querySelectorAll('[data-exp]').forEach(b => b.onclick = () => { const r = history()[+b.dataset.exp]; download(`tahkir-${r.finishedAt.slice(0, 10)}.json`, JSON.stringify(r, null, 2)); });
-  el.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { if (!confirm('למחוק את התחקור הזה מההיסטוריה?')) return; const hh = history(); hh.splice(+b.dataset.del, 1); saveHistory(hh); render(); });
+  el.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+    if (!confirm('למחוק את התחקור הזה מההיסטוריה?')) return;
+    const hh = history(); const [gone] = hh.splice(+b.dataset.del, 1); saveHistory(hh);
+    if (gone && gone.id && (!state || state.id !== gone.id)) await delPdf(gone.id);
+    render();
+  });
+  el.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openRevisit(history()[+b.dataset.open], 'home'));
   const ea = el.querySelector('#expAll');
   if (ea) ea.onclick = () => download(`tahkirim-all-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(history(), null, 2));
 }
@@ -366,7 +374,7 @@ async function startUpload(file) {
     state = {
       id, exam: file.name.replace(/\.pdf$/i, ''), createdAt: new Date().toISOString(),
       essay: { pages: res.essayPages, minutes: DEFAULT_ESSAY_MIN },
-      sections: res.sections, keyFound: res.keyFound, scoringFound: res.scoringFound,
+      sections: res.sections, keyFound: res.keyFound, scoringFound: res.scoringFound, numPages: pdfDoc.numPages,
       phase: 'setup', current: null, phaseStart: 0, phaseEnd: 0, warned: false,
       answers: {}, log: [], qtime: {}, phases: [],
     };
@@ -729,6 +737,8 @@ function archive() {
   const hh = history();
   const i = hh.findIndex(r => r.id === state.id);
   rep.id = state.id;
+  rep.numPages = state.numPages || (pdfDoc ? pdfDoc.numPages : null);
+  rep.layout = layoutOf(state.sections);
   if (i >= 0) hh[i] = rep; else hh.unshift(rep);
   saveHistory(hh);
 }
@@ -761,7 +771,8 @@ function renderReview() {
       <button class="btn" id="mkSave">שמור מפתח</button></div>`;
   }
   html += `<div class="row exports">
-      <button class="btn" id="expJson">ייצוא תחקור (JSON)</button>
+      <button class="btn" id="openRev">פתח את המבחן לחזרה</button>
+      <button class="btn secondary" id="expJson">ייצוא תחקור (JSON)</button>
       <button class="btn secondary" id="expCsv">ייצוא לטבלה (CSV)</button>
       <button class="btn secondary" id="copy">העתק סיכום</button>
       <button class="btn secondary" id="newExam">סימולציה חדשה</button>
@@ -808,8 +819,9 @@ function renderReview() {
   };
   el.querySelector('#newExam').onclick = async () => {
     if (!confirm('להתחיל סימולציה חדשה? התחקור הזה כבר שמור בהיסטוריה.')) return;
-    await delPdf(st.id); state = null; localStorage.removeItem(STATE_KEY); pdfDoc = null; render();
+    state = null; localStorage.removeItem(STATE_KEY); pdfDoc = null; render(); // the PDF stays saved, for reopening from history
   };
+  el.querySelector('#openRev').onclick = () => { archive(); openRevisit(history().find(r => r.id === st.id), 'review'); };
   el.querySelectorAll('[data-pilot]').forEach(cb => cb.onchange = () => { st.sections[+cb.dataset.pilot].pilot = cb.checked; save(); archive(); render(); });
   el.querySelectorAll('.qtable tr[data-q]').forEach(tr => tr.onclick = () => showQuestion(+tr.dataset.s, +tr.dataset.q));
 
@@ -854,6 +866,145 @@ async function showQuestion(si, q) {
   modal(box);
 }
 
+// ---------- reopen the exam in review mode ----------
+function layoutOf(sections) {
+  return sections.map(s => ({ pages: s.pages, inlineOk: s.inlineOk, questions: s.questions.map(q => ({ page: q.page, ny: +q.ny.toFixed(4), top: +q.top.toFixed(4), bottom: +q.bottom.toFixed(4) })) }));
+}
+
+async function openRevisit(entry, back) {
+  if (!entry) return;
+  let layout = entry.layout;
+  const buf = await getPdf(entry.id).catch(() => null);
+  if (buf && layout) {
+    const doc = await pdfjs.getDocument({ data: buf.slice(0) }).promise;
+    revisit = { rep: entry, layout, doc, si: 0, back };
+    render(); return;
+  }
+  // the PDF isn't saved on this device (or the entry is from before layouts were stored): ask for it again
+  const box = h(`<div class="reupload">
+    <h2>צריך את קובץ הבחינה</h2>
+    <p class="muted">הקובץ של <b>${esc(entry.exam)}</b> לא שמור במכשיר הזה. העלה אותו שוב, את אותו PDF שעליו עשית את הסימולציה.</p>
+    <label class="btn">בחר קובץ<input type="file" accept="application/pdf" hidden></label>
+    <div class="progress hidden"><div class="bar"></div><div class="small muted">מעבד…</div></div>
+    <div class="error hidden"></div></div>`);
+  modal(box);
+  const inp = box.querySelector('input'), err = box.querySelector('.error'), prog = box.querySelector('.progress');
+  inp.onchange = async () => {
+    const f = inp.files[0]; inp.value = '';
+    if (!f) return;
+    err.classList.add('hidden');
+    try {
+      const b2 = await f.arrayBuffer();
+      let doc;
+      try { doc = await pdfjs.getDocument({ data: b2.slice(0) }).promise; } catch { throw new Error('זה לא קובץ PDF תקין.'); }
+      if (entry.numPages && doc.numPages !== entry.numPages) throw new Error(`זה לא אותו קובץ: לבחינה היו ${entry.numPages} עמודים ולקובץ הזה ${doc.numPages}.`);
+      if (!layout) {
+        prog.classList.remove('hidden');
+        const res = await analyzeExam(p => { prog.querySelector('.bar').style.width = Math.round(p * 100) + '%'; }, doc);
+        const same = res.sections.length === entry.sections.length && res.sections.every((s, i) => s.num === entry.sections[i].num);
+        if (!same) throw new Error('המבנה של הקובץ לא תואם לסימולציה הזאת. בדוק שזה אותו קובץ.');
+        res.sections.forEach((s, i) => { s.inlineOk = s.questions.length === entry.sections[i].total; });
+        layout = layoutOf(res.sections);
+      }
+      await putPdf(entry.id, b2);
+      const hh = history(); const k = hh.findIndex(r => r.id === entry.id);
+      if (k >= 0) { hh[k].layout = layout; hh[k].numPages = doc.numPages; saveHistory(hh); }
+      document.getElementById('modal').classList.add('hidden');
+      revisit = { rep: { ...entry, layout }, layout, doc, si: 0, back };
+      render();
+    } catch (e) {
+      prog.classList.add('hidden');
+      err.textContent = e.message || 'שגיאה בקריאת הקובץ'; err.classList.remove('hidden');
+    }
+  };
+}
+
+function resultOf(q) { return !q.answer ? 'blank' : q.isCorrect ? 'right' : q.isCorrect === false ? 'wrong' : 'unknown'; }
+
+function renderRevisit() {
+  const gen = renderGen;
+  const { rep: R, layout, doc } = revisit;
+  const si = revisit.si;
+  const S = R.sections[si], L = layout[si];
+  document.body.classList.add('in-exam');
+  const el = h(`
+  <div class="exam revisit">
+    <div class="revbar">
+      <button class="btn small secondary" id="back">→ חזרה לתחקור</button>
+      <div class="tabs">${R.sections.map((x, i) => `<button class="tab ${i === si ? 'on' : ''}" data-si="${i}">פרק ${x.num}<span class="tabdom"> · ${domainName(x.domain)}</span> <span class="tabscore">${x.correct}/${x.total}</span>${x.pilot ? ' <span class="tag">פיילוט</span>' : ''}</button>`).join('')}</div>
+    </div>
+    <div class="booklet" id="booklet"></div>
+    <div class="answerbar">
+      <div class="bar-title">פרק ${S.num}</div>
+      <div class="grid">${S.questions.map(q => `<button class="cell res-${resultOf(q)}" data-q="${q.q}" title="שלי: ${q.answer ?? '—'} · נכונה: ${q.correct ?? '?'} · זמן: ${fmt((q.timeSec || 0) * 1000)}"><span class="n">${q.q}</span><span class="a">${q.answer ?? ''}</span><span class="t">${fmt((q.timeSec || 0) * 1000)}</span></button>`).join('')}</div>
+      <div class="current"><button class="btn small secondary" id="prevWrong">→ השגויה הקודמת</button><button class="btn small secondary" id="nextWrong">השגויה הבאה ←</button></div>
+    </div>
+  </div>`);
+  $app.innerHTML = ''; $app.appendChild(el);
+  el.querySelector('#back').onclick = () => { revisit = null; render(); };
+  el.querySelectorAll('.tab').forEach(t => t.onclick = () => { revisit.si = +t.dataset.si; render(); });
+
+  const booklet = el.querySelector('#booklet');
+  const narrow = window.innerWidth <= 760;
+  const width = Math.max(280, Math.min(900, booklet.clientWidth - (narrow ? 12 : 190)));
+  const boxes = {};
+  for (const pn of L.pages) {
+    const wrap = h(`<div class="pagewrap"><div class="side rev"></div><div class="pagebox" data-page="${pn}"><div class="loading">טוען…</div></div></div>`);
+    wrap.querySelector('.pagebox').style.width = width + 'px';
+    booklet.appendChild(wrap);
+    boxes[pn] = wrap;
+  }
+  if (!L.inlineOk) booklet.insertBefore(h(`<div class="warnbox" style="max-width:${width}px;margin:0 auto 12px">בפרק הזה לא זוהה המיקום של כל שאלה, אז הסימון מופיע רק בסרגל שלמטה.</div>`), booklet.firstChild);
+  const dpr = Math.min(2.5, window.devicePixelRatio || 1);
+  (async () => {
+    for (const pn of L.pages) {
+      const c = await renderPageCanvas(pn, Math.round(width * dpr), doc);
+      if (gen !== renderGen) return;
+      c.style.width = width + 'px';
+      const wrap = boxes[pn], box = wrap.querySelector('.pagebox');
+      box.innerHTML = ''; box.appendChild(c);
+      if (!L.inlineOk) continue;
+      const hpx = width * c.height / c.width;
+      const side = wrap.querySelector('.side'); side.style.height = hpx + 'px';
+      L.questions.forEach((q, i) => {
+        if (q.page !== pn) return;
+        const Q = S.questions[i]; if (!Q) return;
+        const res = resultOf(Q);
+        const sh = h(`<div class="qshade rev res-${res}" data-q="${Q.q}"></div>`);
+        sh.style.top = (q.top * 100) + '%'; sh.style.height = ((q.bottom - q.top) * 100) + '%';
+        const tm = fmt((Q.timeSec || 0) * 1000) + (Q.autoAssignedSec ? '*' : '');
+        const label = (res === 'right' ? '✓' : res === 'wrong' ? `✗ סימנת ${Q.answer}, נכונה ${Q.correct}` : res === 'blank' ? `ללא תשובה, נכונה ${Q.correct ?? '?'}` : '') + ` · ⏱ ${tm}`;
+        sh.appendChild(h(`<span class="corner res-${res}">${label}</span>`));
+        box.appendChild(sh);
+        const g = h(`<div class="bubbles rev" data-q="${Q.q}"><span class="qn">${Q.q}</span>${[1, 2, 3, 4].map(a => `<span class="b ${a === Q.correct ? 'correct' : ''} ${a === Q.answer ? 'mine' : ''}">${a}</span>`).join('')}
+          <div class="meta"><span class="st res-${res}">${res === 'right' ? '✓ נכון' : res === 'wrong' ? '✗ שגוי' : res === 'blank' ? 'ללא תשובה' : ''}</span><span class="tm" title="${Q.autoAssignedSec ? 'כולל זמן שנזקף אוטומטית (סומנה בלי לחיצה)' : 'זמן על השאלה'}">⏱ ${tm}</span></div></div>`);
+        g.style.top = (q.ny * hpx - 6) + 'px';
+        side.appendChild(g);
+      });
+    }
+  })();
+
+  const jump = (qn) => {
+    if (!L.inlineOk) return;
+    const q = L.questions[qn - 1]; if (!q) return;
+    const box = booklet.querySelector(`.pagebox[data-page="${q.page}"]`); if (!box) return;
+    booklet.scrollTo({ top: Math.max(0, box.offsetTop + q.top * box.offsetHeight - booklet.clientHeight * SCROLL_TO), behavior: 'smooth' });
+    el.querySelectorAll('.cell').forEach(c => c.classList.toggle('sel', +c.dataset.q === qn));
+    revisit.cur = qn;
+  };
+  el.querySelectorAll('.cell').forEach(c => c.onclick = () => jump(+c.dataset.q));
+  const wrongs = S.questions.filter(q => resultOf(q) === 'wrong' || resultOf(q) === 'blank').map(q => q.q);
+  const step = (dir) => {
+    if (!wrongs.length) { toast('אין שגויות בפרק הזה', 2500); return; }
+    const cur = revisit.cur || 0;
+    const next = dir > 0 ? (wrongs.find(q => q > cur) ?? wrongs[0]) : ([...wrongs].reverse().find(q => q < cur) ?? wrongs[wrongs.length - 1]);
+    jump(next);
+  };
+  revisit.cur = 0;
+  el.querySelector('#nextWrong').onclick = () => step(1);
+  el.querySelector('#prevWrong').onclick = () => step(-1);
+}
+
 // ---------- other tabs / leaving the page ----------
 function renderLocked() {
   document.body.classList.remove('in-exam');
@@ -889,6 +1040,7 @@ async function boot() {
       if (state.phase !== 'done') { state = null; localStorage.removeItem(STATE_KEY); }
     }
   }
+  if (state && state.phase === 'done') archive();
   render();
 }
 boot();
