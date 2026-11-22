@@ -317,6 +317,7 @@ function render() {
   if (revisit) return renderRevisit();
   if (!state || state.phase === 'setup') return state ? renderSetup() : renderHome();
   if (state.phase === 'done') return renderReview();
+  if (state.phase === 'entry') return renderEntry();
   return renderExam();
 }
 
@@ -335,7 +336,7 @@ function renderHome() {
     <div id="err" class="error hidden"></div>
     ${hist.length ? `<h2>סימולציות קודמות</h2>
     <table class="hist"><thead><tr><th>תאריך</th><th>קובץ</th><th>V</th><th>Q</th><th>דו-תחומי</th><th></th></tr></thead><tbody>
-    ${hist.map((r, i) => `<tr><td>${new Date(r.finishedAt).toLocaleDateString('he-IL')}</td><td class="fname">${esc(r.exam)}</td><td>${r.scores?.V ?? '—'}</td><td>${r.scores?.Q ?? '—'}</td><td>${r.scores?.two ? rng(r.scores.two.lo, r.scores.two.hi) : '—'}</td><td><button class="link" data-open="${i}">פתח מבחן</button> <button class="link" data-exp="${i}">ייצוא</button> <button class="link danger" data-del="${i}">מחק</button></td></tr>`).join('')}
+    ${hist.map((r, i) => `<tr><td>${new Date(r.finishedAt).toLocaleDateString('he-IL')}</td><td class="fname">${esc(r.exam)}${r.paper ? ' <span class="tag">נייר</span>' : ''}</td><td>${r.scores?.V ?? '—'}</td><td>${r.scores?.Q ?? '—'}</td><td>${r.scores?.two ? rng(r.scores.two.lo, r.scores.two.hi) : '—'}</td><td><button class="link" data-open="${i}">פתח מבחן</button> <button class="link" data-exp="${i}">ייצוא</button> <button class="link danger" data-del="${i}">מחק</button></td></tr>`).join('')}
     </tbody></table>
     <button class="btn secondary" id="expAll">ייצוא כל התחקורים (JSON)</button>` : ''}
   </div>`);
@@ -421,6 +422,7 @@ function renderSetup() {
     </div>
     <div class="row">
       <button class="btn" id="start">התחל בחינה</button>
+      <button class="btn secondary" id="paper">הזן תשובות ממבחן על נייר</button>
       <button class="btn secondary" id="cancel">בטל וחזור</button>
     </div>
   </div>`);
@@ -428,6 +430,7 @@ function renderSetup() {
   el.querySelectorAll('[data-sec]').forEach(inp => inp.onchange = () => { s.sections[+inp.dataset.sec].minutes = Math.max(1, +inp.value || DEFAULT_SECTION_MIN); save(); });
   const ei = el.querySelector('[data-essay]'); if (ei) ei.onchange = () => { s.essay.minutes = Math.max(1, +ei.value || DEFAULT_ESSAY_MIN); save(); };
   el.querySelector('#cancel').onclick = async () => { await delPdf(s.id); state = null; localStorage.removeItem(STATE_KEY); render(); };
+  el.querySelector('#paper').onclick = () => { s.paper = true; s.phase = 'entry'; s.entryCursor = { si: 0, q: 1 }; save(); render(); };
   el.querySelector('#start').onclick = () => {
     const first = s.essay.pages.length ? -1 : 0;
     beginPhase(first, Date.now());
@@ -690,6 +693,88 @@ function tick(booklet) {
   if (now % 5000 < 600) save();
 }
 
+// ---------- answers from a paper exam ----------
+function renderEntry() {
+  const st = state;
+  const cur = st.entryCursor || (st.entryCursor = { si: 0, q: 1 });
+  const el = h(`<div class="page entry">
+    <h1>הזנת תשובות · ${esc(st.exam)}</h1>
+    <p class="muted">לוחצים על העיגולים, או מקלידים: <b>1–4</b> מסמן ומתקדם לשאלה הבאה, <b>0</b> או <b>רווח</b> = ללא תשובה, <b>Backspace</b> חוזר אחורה ומוחק. החצים זזים בין שאלות.</p>
+    ${st.sections.map((s, si) => `<section class="entry-sec">
+      <h2>פרק ${s.num} · ${domainName(s.domain)} <span class="muted small" data-cnt="${si}"></span></h2>
+      <div class="sheet" style="--rows:${Math.ceil(s.count / 4)}">${Array.from({ length: s.count }, (_, k) => `<div class="srow" data-si="${si}" data-q="${k + 1}"><span class="sn">${k + 1}</span>${[1, 2, 3, 4].map(a => `<button data-a="${a}">${a}</button>`).join('')}</div>`).join('')}</div>
+    </section>`).join('')}
+    <div class="row entry-actions">
+      <button class="btn" id="check">בדוק</button>
+      <button class="btn secondary" id="back">${st.finishedAt ? 'ביטול' : 'חזרה'}</button>
+    </div>
+  </div>`);
+  $app.innerHTML = ''; $app.appendChild(el);
+
+  const refresh = (scroll) => {
+    st.sections.forEach((s, si) => {
+      const ans = st.answers[si] || {};
+      const n = Object.keys(ans).length;
+      el.querySelector(`[data-cnt="${si}"]`).textContent = `${n}/${s.count}`;
+    });
+    el.querySelectorAll('.srow').forEach(r => {
+      const si = +r.dataset.si, q = +r.dataset.q, a = (st.answers[si] || {})[q];
+      r.querySelectorAll('button').forEach(b => b.classList.toggle('on', +b.dataset.a === a));
+      const isCur = si === cur.si && q === cur.q;
+      r.classList.toggle('cur', isCur);
+      if (isCur && scroll) r.scrollIntoView({ block: 'nearest' });
+    });
+  };
+  const setA = (si, q, a) => {
+    const ans = st.answers[si] || (st.answers[si] = {});
+    if (a) ans[q] = a; else delete ans[q];
+    save();
+  };
+  const move = (d) => {
+    let { si, q } = cur; q += d;
+    if (q > st.sections[si].count) { if (si + 1 < st.sections.length) { si++; q = 1; } else q = st.sections[si].count; }
+    if (q < 1) { if (si > 0) { si--; q = st.sections[si].count; } else q = 1; }
+    cur.si = si; cur.q = q; save();
+  };
+  el.querySelectorAll('.srow').forEach(r => {
+    r.onclick = (e) => {
+      const si = +r.dataset.si, q = +r.dataset.q;
+      cur.si = si; cur.q = q;
+      const b = e.target.closest('button');
+      if (b) { const a = +b.dataset.a; setA(si, q, (st.answers[si] || {})[q] === a ? null : a); move(1); }
+      save(); refresh(false);
+    };
+  });
+  document.onkeydown = (e) => {
+    if (state !== st || st.phase !== 'entry') { document.onkeydown = null; return; }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key;
+    if (/^[1-4]$/.test(k)) { setA(cur.si, cur.q, +k); move(1); }
+    else if (k === '0' || k === ' ') { setA(cur.si, cur.q, null); move(1); }
+    else if (k === 'Backspace') { move(-1); setA(cur.si, cur.q, null); }
+    else if (k === 'ArrowLeft' || k === 'ArrowDown') move(1);
+    else if (k === 'ArrowRight' || k === 'ArrowUp') move(-1);
+    else return;
+    e.preventDefault();
+    refresh(true);
+  };
+  el.querySelector('#back').onclick = () => {
+    document.onkeydown = null;
+    if (st.finishedAt) { st.phase = 'done'; save(); archive(); }
+    else { st.phase = 'setup'; st.paper = false; save(); }
+    render();
+  };
+  el.querySelector('#check').onclick = () => {
+    const missing = st.sections.reduce((a, s, si) => a + s.count - Object.keys(st.answers[si] || {}).length, 0);
+    if (missing && !confirm(`יש ${missing} שאלות בלי תשובה. לבדוק בכל זאת?`)) return;
+    document.onkeydown = null;
+    st.phase = 'done';
+    if (!st.finishedAt) st.finishedAt = new Date().toISOString();
+    save(); archive(); render();
+  };
+  refresh(true);
+}
+
 // ---------- results / review ----------
 function buildReport(st) {
   const scores = computeScores(st);
@@ -704,7 +789,7 @@ function buildReport(st) {
       const correct = s.key ? s.key[k] : null;
       return {
         q, answer: ans[q] || null, correct, isCorrect: s.key ? (ans[q] || null) === correct : null,
-        timeSec: Math.round((qt[q] || 0) / 1000),
+        timeSec: st.paper ? null : Math.round((qt[q] || 0) / 1000),
         changes: Math.max(0, my.length - 1),
         firstAnswerSec: my.length && ph ? Math.round((my[0].t - ph.start) / 1000) : null,
         lastAnswerSec: my.length && ph ? Math.round((my[my.length - 1].t - ph.start) / 1000) : null,
@@ -724,7 +809,7 @@ function buildReport(st) {
   });
   const essayPh = st.phases.find(p => p.idx === -1);
   return {
-    exam: st.exam, startedAt: st.phases[0] ? new Date(st.phases[0].start).toISOString() : null, finishedAt: st.finishedAt,
+    exam: st.exam, paper: !!st.paper, startedAt: st.phases[0] ? new Date(st.phases[0].start).toISOString() : null, finishedAt: st.finishedAt,
     essay: essayPh ? { minutes: st.essay.minutes, timeUsedSec: essayPh.end ? Math.round((essayPh.end - essayPh.start) / 1000) : null } : null,
     scores: scores.complete ? { vRaw: scores.vRaw, qRaw: scores.qRaw, V: scores.V, Q: scores.Q, two: scores.two, verbalEmphasis: scores.verbalW, quantEmphasis: scores.quantW, percentBelow: scores.pct.below } : null,
     sections,
@@ -745,7 +830,7 @@ function archive() {
 
 function toCSV(rep) {
   const rows = [['פרק', 'תחום', 'פיילוט', 'שאלה', 'תשובה שלי', 'נכונה', 'צדקתי', 'זמן (שנ׳)', 'שינויים']];
-  rep.sections.forEach(s => s.questions.forEach(q => rows.push([s.num, domainName(s.domain), s.pilot ? 'כן' : '', q.q, q.answer ?? '', q.correct ?? '', q.isCorrect == null ? '' : q.isCorrect ? '✓' : '✗', q.timeSec, q.changes])));
+  rep.sections.forEach(s => s.questions.forEach(q => rows.push([s.num, domainName(s.domain), s.pilot ? 'כן' : '', q.q, q.answer ?? '', q.correct ?? '', q.isCorrect == null ? '' : q.isCorrect ? '✓' : '✗', q.timeSec ?? '', q.changes])));
   return '﻿' + rows.map(r => r.join(',')).join('\n');
 }
 
@@ -772,13 +857,15 @@ function renderReview() {
   }
   html += `<div class="row exports">
       <button class="btn" id="openRev">פתח את המבחן לחזרה</button>
+      ${st.paper ? '<button class="btn secondary" id="editAns">ערוך תשובות</button>' : ''}
       <button class="btn secondary" id="expJson">ייצוא תחקור (JSON)</button>
       <button class="btn secondary" id="expCsv">ייצוא לטבלה (CSV)</button>
       <button class="btn secondary" id="copy">העתק סיכום</button>
       <button class="btn secondary" id="newExam">סימולציה חדשה</button>
     </div>`;
+  const paper = !!st.paper;
   rep.sections.forEach((s, i) => {
-    const times = s.questions.map(q => q.timeSec);
+    const times = s.questions.map(q => q.timeSec || 0);
     const answeredQs = s.questions.filter(q => q.isCorrect != null);
     const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
     const avgOk = avg(answeredQs.filter(q => q.isCorrect).map(q => q.timeSec));
@@ -792,18 +879,18 @@ function renderReview() {
       <div class="sec-summary">
         <span><b>${s.correct}/${s.total}</b> נכונות</span>
         <span>ללא תשובה: <b>${s.total - s.answered}</b></span>
-        <span>זמן בפועל: <b>${s.timeUsedSec != null ? fmt(s.timeUsedSec * 1000) : '—'}</b> מתוך ${s.minutes}:00 ${s.endedBy === 'user' ? '(סיימת מוקדם)' : ''}</span>
-        <span>ממוצע לשאלה נכונה: <b>${fmt(avgOk * 1000)}</b> · לשאלה שגויה: <b>${fmt(avgBad * 1000)}</b></span>
+        ${paper ? '' : `<span>זמן בפועל: <b>${s.timeUsedSec != null ? fmt(s.timeUsedSec * 1000) : '—'}</b> מתוך ${s.minutes}:00 ${s.endedBy === 'user' ? '(סיימת מוקדם)' : ''}</span>
+        <span>ממוצע לשאלה נכונה: <b>${fmt(avgOk * 1000)}</b> · לשאלה שגויה: <b>${fmt(avgBad * 1000)}</b></span>`}
         ${s.passageTimeSec > 5 ? `<span>קטעי קריאה/הוראות: <b>${fmt(s.passageTimeSec * 1000)}</b></span>` : ''}
         ${s.unassignedTimeSec > 5 ? `<span>לא משויך: <b>${fmt(s.unassignedTimeSec * 1000)}</b></span>` : ''}
         ${maxT >= 5 ? `<span>האיטיות ביותר: <b>${slow.join(', ')}</b></span>` : ''}
       </div>
-      <table class="qtable"><thead><tr><th>#</th><th>שלי</th><th>נכונה</th><th></th><th>זמן</th><th class="barcol"></th><th>שינויים</th></tr></thead><tbody>
+      <table class="qtable"><thead><tr><th>#</th><th>שלי</th><th>נכונה</th><th></th>${paper ? '' : '<th>זמן</th><th class="barcol"></th><th>שינויים</th>'}</tr></thead><tbody>
       ${s.questions.map(q => `<tr class="${q.isCorrect == null ? '' : !q.answer ? 'blank' : q.isCorrect ? 'right' : 'wrong'}" data-s="${i}" data-q="${q.q}">
         <td>${q.q}</td><td>${q.answer ?? '—'}</td><td>${q.correct ?? '?'}</td><td>${q.isCorrect == null ? '' : !q.answer ? 'ללא' : q.isCorrect ? '✓' : '✗'}</td>
-        <td>${fmt(q.timeSec * 1000)}${q.autoAssignedSec ? '<span class="auto" title="נזקף אוטומטית: סומנה בלי לחיצה">*</span>' : ''}</td><td class="barcol"><div class="tbar" style="width:${Math.round(100 * q.timeSec / maxT)}%"></div></td><td>${q.changes || ''}</td></tr>`).join('')}
+        ${paper ? '' : `<td>${fmt(q.timeSec * 1000)}${q.autoAssignedSec ? '<span class="auto" title="נזקף אוטומטית: סומנה בלי לחיצה">*</span>' : ''}</td><td class="barcol"><div class="tbar" style="width:${Math.round(100 * q.timeSec / maxT)}%"></div></td><td>${q.changes || ''}</td>`}</tr>`).join('')}
       </tbody></table>
-      <div class="small muted">${st.sections[i].inlineOk ? 'לחץ על שורה כדי לראות את השאלה. ' : ''}* = זמן שנזקף לשאלה כי סומנה בלי שנלחצה קודם.</div>
+      <div class="small muted">${st.sections[i].inlineOk ? 'לחץ על שורה כדי לראות את השאלה. ' : ''}${paper ? '' : '* = זמן שנזקף לשאלה כי סומנה בלי שנלחצה קודם.'}</div>
     </section>`;
   });
   el.innerHTML = html;
@@ -812,15 +899,17 @@ function renderReview() {
   el.querySelector('#expJson').onclick = () => download(`tahkir-${safeName(st.exam)}-${(st.finishedAt || '').slice(0, 10)}.json`, JSON.stringify(rep, null, 2));
   el.querySelector('#expCsv').onclick = () => download(`tahkir-${(st.finishedAt || '').slice(0, 10)}.csv`, toCSV(rep), 'text/csv');
   el.querySelector('#copy').onclick = async () => {
-    const lines = [`סימולציה: ${st.exam} (${(st.finishedAt || '').slice(0, 10)})`];
+    const lines = [`סימולציה: ${st.exam}${paper ? ' (על נייר)' : ''} (${(st.finishedAt || '').slice(0, 10)})`];
     if (sc.complete) lines.push(`V ${sc.V} (${sc.vRaw} גלם) · Q ${sc.Q} (${sc.qRaw} גלם) · דו-תחומי ${sc.two.lo}–${sc.two.hi}`);
-    rep.sections.forEach(s => lines.push(`פרק ${s.num} ${domainName(s.domain)}${s.pilot ? ' (פיילוט)' : ''}: ${s.correct}/${s.total}, זמן ${s.timeUsedSec != null ? fmt(s.timeUsedSec * 1000) : '—'}, שגויות: ${s.questions.filter(q => q.isCorrect === false).map(q => q.q).join(',') || 'אין'}`));
+    rep.sections.forEach(s => lines.push(`פרק ${s.num} ${domainName(s.domain)}${s.pilot ? ' (פיילוט)' : ''}: ${s.correct}/${s.total}${paper ? '' : `, זמן ${s.timeUsedSec != null ? fmt(s.timeUsedSec * 1000) : '—'}`}, שגויות: ${s.questions.filter(q => q.isCorrect === false).map(q => q.q).join(',') || 'אין'}`));
     try { await navigator.clipboard.writeText(lines.join('\n')); toast('הסיכום הועתק', 2500); } catch { modal(h(`<pre class="copybox">${esc(lines.join('\n'))}</pre>`)); }
   };
   el.querySelector('#newExam').onclick = async () => {
     if (!confirm('להתחיל סימולציה חדשה? התחקור הזה כבר שמור בהיסטוריה.')) return;
     state = null; localStorage.removeItem(STATE_KEY); pdfDoc = null; render(); // the PDF stays saved, for reopening from history
   };
+  const ea = el.querySelector('#editAns');
+  if (ea) ea.onclick = () => { st.phase = 'entry'; st.entryCursor = { si: 0, q: 1 }; save(); render(); };
   el.querySelector('#openRev').onclick = () => { archive(); openRevisit(history().find(r => r.id === st.id), 'review'); };
   el.querySelectorAll('[data-pilot]').forEach(cb => cb.onchange = () => { st.sections[+cb.dataset.pilot].pilot = cb.checked; save(); archive(); render(); });
   el.querySelectorAll('.qtable tr[data-q]').forEach(tr => tr.onclick = () => showQuestion(+tr.dataset.s, +tr.dataset.q));
@@ -936,7 +1025,7 @@ function renderRevisit() {
     <div class="booklet" id="booklet"></div>
     <div class="answerbar">
       <div class="bar-title">פרק ${S.num}</div>
-      <div class="grid">${S.questions.map(q => `<button class="cell res-${resultOf(q)}" data-q="${q.q}" title="שלי: ${q.answer ?? '—'} · נכונה: ${q.correct ?? '?'} · זמן: ${fmt((q.timeSec || 0) * 1000)}"><span class="n">${q.q}</span><span class="a">${q.answer ?? ''}</span><span class="t">${fmt((q.timeSec || 0) * 1000)}</span></button>`).join('')}</div>
+      <div class="grid">${S.questions.map(q => `<button class="cell res-${resultOf(q)}" data-q="${q.q}" title="שלי: ${q.answer ?? '—'} · נכונה: ${q.correct ?? '?'}${q.timeSec == null ? '' : ` · זמן: ${fmt(q.timeSec * 1000)}`}"><span class="n">${q.q}</span><span class="a">${q.answer ?? ''}</span>${q.timeSec == null ? '' : `<span class="t">${fmt(q.timeSec * 1000)}</span>`}</button>`).join('')}</div>
       <div class="current"><button class="btn small secondary" id="prevWrong">→ השגויה הקודמת</button><button class="btn small secondary" id="nextWrong">השגויה הבאה ←</button></div>
     </div>
   </div>`);
@@ -972,12 +1061,12 @@ function renderRevisit() {
         const res = resultOf(Q);
         const sh = h(`<div class="qshade rev res-${res}" data-q="${Q.q}"></div>`);
         sh.style.top = (q.top * 100) + '%'; sh.style.height = ((q.bottom - q.top) * 100) + '%';
-        const tm = fmt((Q.timeSec || 0) * 1000) + (Q.autoAssignedSec ? '*' : '');
-        const label = (res === 'right' ? '✓' : res === 'wrong' ? `✗ סימנת ${Q.answer}, נכונה ${Q.correct}` : res === 'blank' ? `ללא תשובה, נכונה ${Q.correct ?? '?'}` : '') + ` · ⏱ ${tm}`;
+        const tm = Q.timeSec == null ? '' : fmt(Q.timeSec * 1000) + (Q.autoAssignedSec ? '*' : '');
+        const label = (res === 'right' ? '✓' : res === 'wrong' ? `✗ סימנת ${Q.answer}, נכונה ${Q.correct}` : res === 'blank' ? `ללא תשובה, נכונה ${Q.correct ?? '?'}` : '') + (tm ? ` · ⏱ ${tm}` : '');
         sh.appendChild(h(`<span class="corner res-${res}">${label}</span>`));
         box.appendChild(sh);
         const g = h(`<div class="bubbles rev" data-q="${Q.q}"><span class="qn">${Q.q}</span>${[1, 2, 3, 4].map(a => `<span class="b ${a === Q.correct ? 'correct' : ''} ${a === Q.answer ? 'mine' : ''}">${a}</span>`).join('')}
-          <div class="meta"><span class="st res-${res}">${res === 'right' ? '✓ נכון' : res === 'wrong' ? '✗ שגוי' : res === 'blank' ? 'ללא תשובה' : ''}</span><span class="tm" title="${Q.autoAssignedSec ? 'כולל זמן שנזקף אוטומטית (סומנה בלי לחיצה)' : 'זמן על השאלה'}">⏱ ${tm}</span></div></div>`);
+          <div class="meta"><span class="st res-${res}">${res === 'right' ? '✓ נכון' : res === 'wrong' ? '✗ שגוי' : res === 'blank' ? 'ללא תשובה' : ''}</span>${tm ? `<span class="tm" title="${Q.autoAssignedSec ? 'כולל זמן שנזקף אוטומטית (סומנה בלי לחיצה)' : 'זמן על השאלה'}">⏱ ${tm}</span>` : ''}</div></div>`);
         g.style.top = (q.ny * hpx - 6) + 'px';
         side.appendChild(g);
       });
