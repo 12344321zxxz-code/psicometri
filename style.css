@@ -47,8 +47,8 @@ body.in-exam { overflow: hidden; background: #e9e9e6; }
 .side { position: relative; width: 150px; flex: none; }
 .pagebox { background: var(--paper); box-shadow: 0 1px 4px rgba(0,0,0,.18); min-height: 400px; position: relative; }
 .pagebox canvas { display: block; }
-.qshade { position: absolute; left: 0; right: 0; background: rgba(105,105,112,.17); cursor: pointer; }
-.qshade:hover { background: rgba(105,105,112,.11); }
+.qshade { position: absolute; left: 0; right: 0; background: rgba(80,80,88,.34); cursor: pointer; }
+.qshade:hover { background: rgba(80,80,88,.24); }
 .qshade.on { background: transparent; box-shadow: inset -4px 0 0 var(--accent); cursor: default; }
 .loading { padding: 40px; color: var(--muted); text-align: center; }
 
