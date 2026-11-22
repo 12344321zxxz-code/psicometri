@@ -1,6 +1,6 @@
 // סימולטור פסיכומטרי — מעלה PDF של סימולציה, מציג פרק אחרי פרק עם זמן נעול, ומנקד לפי מפתח התשובות.
 import * as pdfjs from './vendor/pdf.min.js';
-import { RAW_TO_V, RAW_TO_Q, GENERAL_TABLE, PERCENTILE_TABLE } from './tables.js';
+import { extractTables, scoreFromRaw, validateVQ, DEFAULT_TABLES, DEFAULT_LABEL } from './scoring.js';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.js', import.meta.url).href;
 
@@ -83,7 +83,7 @@ function download(name, text, type = 'application/json') {
 async function pageText(page) {
   const tc = await page.getTextContent();
   const H = page.view[3];
-  const items = tc.items.filter(i => i.str && i.str.trim()).map(i => ({ s: i.str.trim(), x: i.transform[4], y: i.transform[5] }));
+  const items = tc.items.filter(i => i.str && i.str.trim()).map(i => ({ s: i.str.trim(), x: i.transform[4], y: i.transform[5], w: i.width }));
   const header = items.filter(i => i.y > H * 0.88).map(i => i.s).join(' ');
   const body = items.filter(i => i.y <= H * 0.88).map(i => i.s).join(' ');
   return { items, header, body, H };
@@ -278,19 +278,11 @@ async function analyzeExam(onProgress, doc = pdfDoc) {
     s.inlineOk = s.questions.length === s.count && s.count > 0;
     s.minutes = DEFAULT_SECTION_MIN;
   }
-  return { essayPages, sections, keyFound: keyBlocks.length > 0, scoringFound };
+  const ext = extractTables(pages.map(p => p.t));
+  return { essayPages, sections, keyFound: keyBlocks.length > 0, scoringFound, ext };
 }
 
 // ---------- scoring ----------
-function weightedToGeneral(w) {
-  const r = Math.round(w * 2) / 2;
-  for (const row of GENERAL_TABLE) if (r <= row.max) return { weighted: r, lo: row.lo, hi: row.hi };
-  return { weighted: r, lo: 800, hi: 800 };
-}
-function percentile(g) {
-  for (const row of PERCENTILE_TABLE) if (g <= row.hi) return row;
-  return PERCENTILE_TABLE[PERCENTILE_TABLE.length - 1];
-}
 function computeScores(st) {
   const per = st.sections.map((s, i) => {
     const ans = st.answers[i] || {};
@@ -301,11 +293,24 @@ function computeScores(st) {
   if (per.some(p => !p.hasKey)) return { per, complete: false };
   const vRaw = per.filter(p => p.domain === 'verbal' && !p.pilot).reduce((a, p) => a + p.correct, 0);
   const qRaw = per.filter(p => p.domain === 'quant' && !p.pilot).reduce((a, p) => a + p.correct, 0);
-  const V = RAW_TO_V[Math.min(vRaw, RAW_TO_V.length - 1)];
-  const Q = RAW_TO_Q[Math.min(qRaw, RAW_TO_Q.length - 1)];
-  const mk = (w) => { const g = weightedToGeneral(w); return { ...g, mid: Math.round((g.lo + g.hi) / 2) }; };
-  const two = mk((V + Q) / 2), verbalW = mk((3 * V + Q) / 4), quantW = mk((3 * Q + V) / 4);
-  return { per, complete: true, vRaw, qRaw, V, Q, two, verbalW, quantW, pct: percentile(two.mid) };
+  return { per, complete: true, ...scoreFromRaw(vRaw, qRaw, tablesFor(st)), table: tableInfo(st) };
+}
+// which conversion table an exam (state or history entry) uses
+function tablesFor(o) { return o.tableSource === 'exam' || o.tableSource === 'manual' ? o.tables : null; }
+function tableInfo(o) {
+  const src = o.tableSource === 'exam' || o.tableSource === 'manual' ? o.tableSource : 'general';
+  const label = src === 'general' ? DEFAULT_LABEL : `טבלת המבחן${o.examLabel ? ' · ' + o.examLabel : ''}${src === 'manual' ? ' (הוזנה ידנית)' : ' (חולצה מהקובץ)'}`;
+  return { source: src, label, exam: o.examLabel || null };
+}
+// recompute a saved report's scores from its per-section correct counts
+function rescoreReport(r) {
+  const hasKey = r.sections && r.sections.every(s => Number.isFinite(s.correct) && (s.questions || []).every(q => q.correct != null));
+  if (!hasKey) return r; // no answer key yet: nothing to score
+  const vRaw = r.sections.filter(s => s.domain === 'verbal' && !s.pilot).reduce((a, s) => a + s.correct, 0);
+  const qRaw = r.sections.filter(s => s.domain === 'quant' && !s.pilot).reduce((a, s) => a + s.correct, 0);
+  const sc = scoreFromRaw(vRaw, qRaw, tablesFor(r));
+  r.scores = { vRaw, qRaw, V: sc.V, Q: sc.Q, two: sc.two, verbalEmphasis: sc.verbalW, quantEmphasis: sc.quantW, percentBelow: sc.percentBelow, table: tableInfo(r) };
+  return r;
 }
 
 // ---------- screens ----------
@@ -336,9 +341,11 @@ function renderHome() {
     <div id="err" class="error hidden"></div>
     ${hist.length ? `<h2>סימולציות קודמות</h2>
     <table class="hist"><thead><tr><th>תאריך</th><th>קובץ</th><th>V</th><th>Q</th><th>דו-תחומי</th><th></th></tr></thead><tbody>
-    ${hist.map((r, i) => `<tr><td>${new Date(r.finishedAt).toLocaleDateString('he-IL')}</td><td class="fname">${esc(r.exam)}${r.paper ? ' <span class="tag">נייר</span>' : ''}</td><td>${r.scores?.V ?? '—'}</td><td>${r.scores?.Q ?? '—'}</td><td>${r.scores?.two ? rng(r.scores.two.lo, r.scores.two.hi) : '—'}</td><td><button class="link" data-open="${i}">פתח מבחן</button> <button class="link" data-exp="${i}">ייצוא</button> <button class="link danger" data-del="${i}">מחק</button></td></tr>`).join('')}
+    ${hist.map((r, i) => `<tr><td>${new Date(r.finishedAt).toLocaleDateString('he-IL')}</td><td class="fname">${esc(r.exam)}${r.examLabel ? ' · ' + esc(r.examLabel) : ''}${r.paper ? ' <span class="tag">נייר</span>' : ''}${r.scores && (r.tableSource || 'general') === 'general' ? ' <span class="tag warn-tag" title="הציון חושב לפי טבלה כללית">טבלה כללית</span>' : ''}</td><td>${r.scores?.V ?? '—'}</td><td>${r.scores?.Q ?? '—'}</td><td>${r.scores?.two ? rng(r.scores.two.lo, r.scores.two.hi) : '—'}</td><td><button class="link" data-open="${i}">פתח מבחן</button> <button class="link" data-exp="${i}">ייצוא</button> <button class="link" data-recalc="${i}">טבלת ציון</button> <button class="link danger" data-del="${i}">מחק</button></td></tr>`).join('')}
     </tbody></table>
     <button class="btn secondary" id="expAll">ייצוא כל התחקורים (JSON)</button>` : ''}
+    <div class="row"><label class="btn secondary">ייבוא תחקור ישן (JSON)<input type="file" accept="application/json,.json" id="importJson" hidden></label>
+    <span class="small muted">מוסיף את התחקור להיסטוריה ומחשב אותו מחדש לפי טבלת המבחן שלו.</span></div>
   </div>`);
   $app.innerHTML = ''; $app.appendChild(el);
   const input = el.querySelector('#file');
@@ -355,6 +362,30 @@ function renderHome() {
     render();
   });
   el.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openRevisit(history()[+b.dataset.open], 'home'));
+  el.querySelectorAll('[data-recalc]').forEach(b => b.onclick = () => recalcEntry(history()[+b.dataset.recalc].id));
+  const ij = el.querySelector('#importJson');
+  ij.onchange = async () => {
+    const f = ij.files[0]; ij.value = '';
+    if (!f) return;
+    let data;
+    try { data = JSON.parse(await f.text()); } catch { toast('הקובץ הזה לא JSON תקין'); return; }
+    const list = (Array.isArray(data) ? data : [data]).filter(r => r && Array.isArray(r.sections) && r.sections.length);
+    if (!list.length) { toast('לא נמצא בקובץ תחקור של סימולציה'); return; }
+    const hh = history();
+    let added = 0, lastId = null;
+    for (const r of list) {
+      const existing = r.id && hh.find(x => x.id === r.id);
+      if (existing) { lastId = existing.id; continue; }
+      r.id = r.id || ('imp' + Date.now() + '_' + added);
+      if (!r.tableSource) r.tableSource = 'general'; // exports from before per-exam tables
+      if (!r.finishedAt) r.finishedAt = new Date().toISOString();
+      hh.unshift(rescoreReport(r)); added++; lastId = r.id;
+    }
+    saveHistory(hh);
+    render();
+    toast(added ? `נוסף${added > 1 ? 'ו ' + added + ' תחקורים' : ' תחקור'} להיסטוריה` : 'התחקור כבר נמצא בהיסטוריה', 3000);
+    if (list.length === 1 && lastId) recalcEntry(lastId);
+  };
   const ea = el.querySelector('#expAll');
   if (ea) ea.onclick = () => download(`tahkirim-all-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(history(), null, 2));
 }
@@ -376,6 +407,8 @@ async function startUpload(file) {
       id, exam: file.name.replace(/\.pdf$/i, ''), createdAt: new Date().toISOString(),
       essay: { pages: res.essayPages, minutes: DEFAULT_ESSAY_MIN },
       sections: res.sections, keyFound: res.keyFound, scoringFound: res.scoringFound, numPages: pdfDoc.numPages,
+      tables: res.ext ? res.ext.tables : null, tableSource: res.ext && res.ext.ok ? 'exam' : 'general',
+      examLabel: res.ext ? res.ext.label : null, tableProblems: res.ext ? res.ext.problems : ['בקובץ אין דף "חישוב אומדן ציוני הבחינה"'],
       phase: 'setup', current: null, phaseStart: 0, phaseEnd: 0, warned: false,
       answers: {}, log: [], qtime: {}, phases: [],
     };
@@ -408,7 +441,8 @@ function renderSetup() {
     </table>
     <div class="checks">
       <div>${s.keyFound ? '<span class="ok">✓</span> מפתח תשובות נמצא בקובץ' : '<span class="warn">✗</span> לא נמצא מפתח תשובות. תוכל להעלות אותו בסוף.'}</div>
-      <div>${s.scoringFound ? '<span class="ok">✓</span> חישוב הציון לפי טבלת המעבר של הבחינה' : 'חישוב הציון לפי טבלת מעבר כללית (הפורמט הדו-תחומי)'}</div>
+      <div>${s.tableSource === 'exam' ? `<span class="ok">✓</span> טבלת המעבר של המבחן${s.examLabel ? ' (' + esc(s.examLabel) + ')' : ''} חולצה מהקובץ` : s.tableSource === 'manual' ? '<span class="ok">✓</span> טבלת המעבר הוזנה ידנית' : `<span class="warn">⚠</span> לא הצלחתי לחלץ את טבלת המעבר של המבחן (${esc((s.tableProblems || [])[0] || '')}). הציון יחושב לפי טבלה כללית.`}
+        <button class="link" id="editTable">${s.tableSource === 'general' ? 'הזן טבלה' : 'הצג / ערוך טבלה'}</button></div>
     </div>
     <div class="howto">
       <b>איך זה עובד</b>
@@ -430,6 +464,7 @@ function renderSetup() {
   el.querySelectorAll('[data-sec]').forEach(inp => inp.onchange = () => { s.sections[+inp.dataset.sec].minutes = Math.max(1, +inp.value || DEFAULT_SECTION_MIN); save(); });
   const ei = el.querySelector('[data-essay]'); if (ei) ei.onchange = () => { s.essay.minutes = Math.max(1, +ei.value || DEFAULT_ESSAY_MIN); save(); };
   el.querySelector('#cancel').onclick = async () => { await delPdf(s.id); state = null; localStorage.removeItem(STATE_KEY); render(); };
+  el.querySelector('#editTable').onclick = () => openTableEditor(s, () => { save(); render(); });
   el.querySelector('#paper').onclick = () => { s.paper = true; s.phase = 'entry'; s.entryCursor = { si: 0, q: 1 }; save(); render(); };
   el.querySelector('#start').onclick = () => {
     const first = s.essay.pages.length ? -1 : 0;
@@ -811,7 +846,8 @@ function buildReport(st) {
   return {
     exam: st.exam, paper: !!st.paper, startedAt: st.phases[0] ? new Date(st.phases[0].start).toISOString() : null, finishedAt: st.finishedAt,
     essay: essayPh ? { minutes: st.essay.minutes, timeUsedSec: essayPh.end ? Math.round((essayPh.end - essayPh.start) / 1000) : null } : null,
-    scores: scores.complete ? { vRaw: scores.vRaw, qRaw: scores.qRaw, V: scores.V, Q: scores.Q, two: scores.two, verbalEmphasis: scores.verbalW, quantEmphasis: scores.quantW, percentBelow: scores.pct.below } : null,
+    scores: scores.complete ? { vRaw: scores.vRaw, qRaw: scores.qRaw, V: scores.V, Q: scores.Q, two: scores.two, verbalEmphasis: scores.verbalW, quantEmphasis: scores.quantW, percentBelow: scores.percentBelow, table: scores.table } : null,
+    examLabel: st.examLabel || null, tableSource: tableInfo(st).source, tables: tablesFor(st),
     sections,
     notes: 'timeSec = זמן שהשאלה הייתה פעילה (נלחצה). autoAssignedSec = זמן שנזקף לשאלה כי סומנה בלי שנלחצה קודם. passageTimeSec = זמן על קטעי קריאה/הוראות. unassignedTimeSec = זמן בלי שאלה פעילה. פרק פיילוט לא נכלל בציון.',
   };
@@ -845,8 +881,11 @@ function renderReview() {
     <div class="scorecards">
       <div class="card"><div class="lbl">חשיבה מילולית</div><div class="big">${sc.V}</div><div class="small muted">${sc.vRaw} נכונות (גלם)</div></div>
       <div class="card"><div class="lbl">חשיבה כמותית</div><div class="big">${sc.Q}</div><div class="small muted">${sc.qRaw} נכונות (גלם)</div></div>
-      <div class="card main"><div class="lbl">אומדן דו-תחומי</div><div class="big">${rng(sc.two.lo, sc.two.hi)}</div><div class="small muted">משוקלל ${sc.two.weighted} · כ-${sc.pct.below}% מהנבחנים מתחת לטווח</div></div>
+      <div class="card main"><div class="lbl">אומדן דו-תחומי</div><div class="big">${rng(sc.two.lo, sc.two.hi)}</div><div class="small muted">משוקלל ${sc.two.weighted} · אמצע הטווח ${sc.two.mid} · כ-${sc.percentBelow}% מהנבחנים מתחת לטווח</div></div>
     </div>
+    ${sc.table.source === 'general'
+      ? `<div class="warnbox"><b>⚠ ציון משוער לפי טבלה כללית.</b> החישוב נעשה לפי ${DEFAULT_LABEL} ולא לפי טבלת המעבר של המבחן הזה. לכל מועד יש טבלה משלו, אז הציון יכול לסטות בכמה נקודות. <button class="link" id="editTable">הזן את טבלת המבחן</button></div>`
+      : `<div class="small muted tablesrc">חושב לפי: <b>${esc(sc.table.label)}</b> · <button class="link" id="editTable">הצג / ערוך טבלה</button></div>`}
     ${(() => { const cnt = (d) => st.sections.filter(x => x.domain === d && !x.pilot).length; return cnt('verbal') !== 2 || cnt('quant') !== 2 ? `<div class="warnbox">הציון מחושב לפי 2 פרקים מילוליים ו-2 כמותיים. כרגע נספרים ${cnt('verbal')} מילוליים ו-${cnt('quant')} כמותיים. סמן את פרק הפיילוט ליד שם הפרק.</div>` : ''; })()}
     <div class="small muted">דגש מילולי: ${rng(sc.verbalW.lo, sc.verbalW.hi)} · דגש כמותי: ${rng(sc.quantW.lo, sc.quantW.hi)}. האומדן מניח שהציון במטלת הכתיבה ברמה של החשיבה המילולית, כמו בהסבר שבקובץ הבחינה.</div>`;
   } else {
@@ -900,7 +939,7 @@ function renderReview() {
   el.querySelector('#expCsv').onclick = () => download(`tahkir-${(st.finishedAt || '').slice(0, 10)}.csv`, toCSV(rep), 'text/csv');
   el.querySelector('#copy').onclick = async () => {
     const lines = [`סימולציה: ${st.exam}${paper ? ' (על נייר)' : ''} (${(st.finishedAt || '').slice(0, 10)})`];
-    if (sc.complete) lines.push(`V ${sc.V} (${sc.vRaw} גלם) · Q ${sc.Q} (${sc.qRaw} גלם) · דו-תחומי ${sc.two.lo}–${sc.two.hi}`);
+    if (sc.complete) lines.push(`V ${sc.V} (${sc.vRaw} גלם) · Q ${sc.Q} (${sc.qRaw} גלם) · דו-תחומי ${sc.two.lo}–${sc.two.hi} · לפי ${sc.table.label}`);
     rep.sections.forEach(s => lines.push(`פרק ${s.num} ${domainName(s.domain)}${s.pilot ? ' (פיילוט)' : ''}: ${s.correct}/${s.total}${paper ? '' : `, זמן ${s.timeUsedSec != null ? fmt(s.timeUsedSec * 1000) : '—'}`}, שגויות: ${s.questions.filter(q => q.isCorrect === false).map(q => q.q).join(',') || 'אין'}`));
     try { await navigator.clipboard.writeText(lines.join('\n')); toast('הסיכום הועתק', 2500); } catch { modal(h(`<pre class="copybox">${esc(lines.join('\n'))}</pre>`)); }
   };
@@ -908,6 +947,8 @@ function renderReview() {
     if (!confirm('להתחיל סימולציה חדשה? התחקור הזה כבר שמור בהיסטוריה.')) return;
     state = null; localStorage.removeItem(STATE_KEY); pdfDoc = null; render(); // the PDF stays saved, for reopening from history
   };
+  const et = el.querySelector('#editTable');
+  if (et) et.onclick = () => openTableEditor(st, () => { save(); archive(); render(); });
   const ea = el.querySelector('#editAns');
   if (ea) ea.onclick = () => { st.phase = 'entry'; st.entryCursor = { si: 0, q: 1 }; save(); render(); };
   el.querySelector('#openRev').onclick = () => { archive(); openRevisit(history().find(r => r.id === st.id), 'review'); };
@@ -953,6 +994,145 @@ async function showQuestion(si, q) {
   const box = h(`<div><div class="qhead">פרק ${s.num} · שאלה ${q} · סימנת: <b>${ans ?? '—'}</b> · נכונה: <b>${s.key ? s.key[q - 1] : '?'}</b></div></div>`);
   box.appendChild(out);
   modal(box);
+}
+
+// ---------- per-exam conversion tables ----------
+async function docPagesText(doc) {
+  const out = [];
+  for (let p = 1; p <= doc.numPages; p++) out.push(await pageText(await doc.getPage(p)));
+  return out;
+}
+
+// edit the raw -> V/Q table of `target` (the current state or a history entry); onSave() persists it
+function openTableEditor(target, onSave) {
+  const base = tablesFor(target) || target.tables || {};
+  let V = (base.V && base.V.length === 47 ? base.V : DEFAULT_TABLES.V).slice();
+  let Q = (base.Q && base.Q.length === 41 ? base.Q : DEFAULT_TABLES.Q).slice();
+  let general = base.general || null, pct = base.pct || null;
+  let source = target.tableSource === 'exam' || target.tableSource === 'manual' ? target.tableSource : null;
+  let label = target.examLabel || null;
+  const box = h(`<div class="tbl-editor">
+    <h2>טבלת מעבר: ציון גלם ← ציון בסולם האחיד</h2>
+    <p class="small muted status"></p>
+    <div class="row">
+      <label class="btn secondary small">חלץ מ-PDF (דף "חישוב אומדן")<input type="file" accept="application/pdf" hidden></label>
+      <button class="btn secondary small" id="pasteBtn">הדבקה מהירה</button>
+      <button class="btn secondary small" id="useGeneral">השתמש בטבלה הכללית</button>
+    </div>
+    <div class="paste hidden">
+      <div class="small muted">הדבק את העמודה של כל תחום לפי הסדר מציון גלם 0, מופרדת ברווחים, פסיקים או שורות.</div>
+      <label>מילולי (47 מספרים)<textarea id="pV" rows="2" dir="ltr"></textarea></label>
+      <label>כמותי (41 מספרים)<textarea id="pQ" rows="2" dir="ltr"></textarea></label>
+      <button class="btn small" id="pasteApply">מלא את הטבלה</button>
+    </div>
+    <div class="tbl-grid"></div>
+    <div class="error hidden"></div>
+    <div class="row"><button class="btn" id="saveTbl">שמור טבלה</button></div>
+  </div>`);
+  const grid = box.querySelector('.tbl-grid'), err = box.querySelector('.error'), status = box.querySelector('.status');
+  const showStatus = () => {
+    status.textContent = source === 'exam' ? `הטבלה חולצה מהקובץ${label ? ' (' + label + ')' : ''}. אפשר לתקן ידנית.` : source === 'manual' ? 'טבלה שהוזנה ידנית.' : `כרגע מוצגת ${DEFAULT_LABEL}. תקן לפי דף האומדן של המבחן, או חלץ אותו מ-PDF.`;
+  };
+  const draw = () => {
+    grid.innerHTML = `<div class="tg-head"><span>גלם</span><span>מילולי</span><span>כמותי</span></div>` +
+      Array.from({ length: 47 }, (_, i) => `<div class="tg-row"><span class="raw">${i}</span><input data-v="${i}" type="number" value="${V[i] ?? ''}">${i <= 40 ? `<input data-q="${i}" type="number" value="${Q[i] ?? ''}">` : '<span></span>'}</div>`).join('');
+    grid.querySelectorAll('input').forEach(inp => inp.oninput = () => {
+      const v = inp.value === '' ? null : +inp.value;
+      if (inp.dataset.v != null) V[+inp.dataset.v] = v; else Q[+inp.dataset.q] = v;
+      if (source === 'exam') { source = 'manual'; showStatus(); }
+    });
+  };
+  draw(); showStatus();
+  modal(box);
+  box.querySelector('input[type=file]').onchange = async (e) => {
+    const f = e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    err.classList.add('hidden');
+    try {
+      const doc = await pdfjs.getDocument({ data: await f.arrayBuffer() }).promise;
+      const ext = extractTables(await docPagesText(doc));
+      if (!ext) throw new Error('לא נמצא בקובץ דף "חישוב אומדן ציוני הבחינה".');
+      if (ext.tables.V) V = ext.tables.V.slice();
+      if (ext.tables.Q) Q = ext.tables.Q.slice();
+      general = ext.tables.general || general; pct = ext.tables.pct || pct;
+      label = ext.label || label;
+      source = ext.ok ? 'exam' : 'manual';
+      draw(); showStatus();
+      if (!ext.ok) { err.textContent = 'החילוץ לא הושלם: ' + ext.problems.join(' · ') + '. השלם את התאים החסרים ידנית.'; err.classList.remove('hidden'); }
+    } catch (e2) { err.textContent = e2.message || 'שגיאה בקריאת הקובץ'; err.classList.remove('hidden'); }
+  };
+  box.querySelector('#pasteBtn').onclick = () => box.querySelector('.paste').classList.toggle('hidden');
+  box.querySelector('#pasteApply').onclick = () => {
+    const nums = (t) => (t.match(/\d+/g) || []).map(Number);
+    const pv = nums(box.querySelector('#pV').value), pq = nums(box.querySelector('#pQ').value);
+    if (pv.length) { if (pv.length !== 47) { err.textContent = `במילולי צריך 47 מספרים (הודבקו ${pv.length})`; err.classList.remove('hidden'); return; } V = pv; }
+    if (pq.length) { if (pq.length !== 41) { err.textContent = `בכמותי צריך 41 מספרים (הודבקו ${pq.length})`; err.classList.remove('hidden'); return; } Q = pq; }
+    err.classList.add('hidden'); source = 'manual'; draw(); showStatus();
+  };
+  box.querySelector('#useGeneral').onclick = () => {
+    if (!confirm('לחשב את המבחן הזה לפי הטבלה הכללית?')) return;
+    target.tableSource = 'general';
+    document.getElementById('modal').classList.add('hidden');
+    onSave();
+  };
+  box.querySelector('#saveTbl').onclick = () => {
+    const errs = validateVQ(V, Q);
+    if (errs.length) { err.textContent = errs.join(' · '); err.classList.remove('hidden'); return; }
+    target.tables = { V, Q, general, pct };
+    target.tableSource = source || 'manual';
+    target.examLabel = label;
+    document.getElementById('modal').classList.add('hidden');
+    onSave();
+  };
+}
+
+// recompute a history entry with its exam's own table: from the saved PDF, an uploaded PDF, or manual entry
+async function recalcEntry(id) {
+  const find = () => { const hh = history(); return { hh, k: hh.findIndex(r => r.id === id) }; };
+  const persist = (entry) => {
+    const { hh, k } = find();
+    if (k < 0) return;
+    hh[k] = rescoreReport(entry); saveHistory(hh);
+    if (state && state.id === id) { state.tables = entry.tables; state.tableSource = entry.tableSource; state.examLabel = entry.examLabel; save(); }
+    render();
+    const sc = hh[k].scores;
+    toast(sc ? `חושב מחדש: V ${sc.V} · Q ${sc.Q} · ${sc.two.lo}–${sc.two.hi} (${sc.table.label})` : 'נשמר', 6000);
+  };
+  const { hh, k } = find(); if (k < 0) return;
+  const entry = hh[k];
+  const buf = await getPdf(id).catch(() => null);
+  const tryDoc = async (data) => {
+    const doc = await pdfjs.getDocument({ data: data.slice(0) }).promise;
+    return extractTables(await docPagesText(doc));
+  };
+  if (buf && entry.tableSource !== 'exam') {
+    const ext = await tryDoc(buf).catch(() => null);
+    if (ext && ext.ok) { Object.assign(entry, { tables: ext.tables, tableSource: 'exam', examLabel: ext.label || entry.examLabel }); persist(entry); return; }
+  }
+  const box = h(`<div class="reupload">
+    <h2>טבלת הציון של ${esc(entry.exam)}</h2>
+    <p class="muted">${tableInfo(entry).source === 'general' ? 'הציון של הסימולציה הזאת חושב לפי טבלה כללית.' : 'חושב לפי: ' + esc(tableInfo(entry).label) + '.'} כדי לחשב לפי טבלת המבחן, העלה את קובץ הבחינה (ה-PDF עם דף "חישוב אומדן"), או הזן את הטבלה ידנית.</p>
+    <div class="row"><label class="btn">העלה PDF של המבחן<input type="file" accept="application/pdf" hidden></label>
+    <button class="btn secondary" id="manual">הזנה ידנית</button></div>
+    <div class="error hidden"></div></div>`);
+  modal(box);
+  const err = box.querySelector('.error');
+  box.querySelector('#manual').onclick = () => openTableEditor(entry, () => persist(entry));
+  box.querySelector('input').onchange = async (e) => {
+    const f = e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    try {
+      const data = await f.arrayBuffer();
+      let ext;
+      try { ext = await tryDoc(data); } catch { throw new Error('זה לא קובץ PDF תקין.'); }
+      if (!ext) throw new Error('לא נמצא בקובץ דף "חישוב אומדן ציוני הבחינה".');
+      if (!ext.ok) { Object.assign(entry, { tables: ext.tables, examLabel: ext.label }); openTableEditor(entry, () => persist(entry)); return; }
+      Object.assign(entry, { tables: ext.tables, tableSource: 'exam', examLabel: ext.label || entry.examLabel });
+      if (!(await getPdf(id).catch(() => null)) && (!entry.numPages || entry.numPages === (await pdfjs.getDocument({ data: data.slice(0) }).promise).numPages)) await putPdf(id, data);
+      document.getElementById('modal').classList.add('hidden');
+      persist(entry);
+    } catch (e2) { err.textContent = e2.message; err.classList.remove('hidden'); }
+  };
 }
 
 // ---------- reopen the exam in review mode ----------
