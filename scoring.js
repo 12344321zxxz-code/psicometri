@@ -1,6 +1,6 @@
 // טבלאות המעבר של מבחן ספציפי, מתוך דף "חישוב אומדן ציוני הבחינה" שבסוף חוברות מאל"ו.
 // הקלט: הטקסט של העמודים (פריטים עם s, x, y, w) כפי ש-pdf.js מחזיר אותו.
-import { RAW_TO_V, RAW_TO_Q, GENERAL_TABLE, PERCENTILE_TABLE } from './tables.js';
+import { RAW_TO_V, RAW_TO_Q, GENERAL_TABLE, PERCENTILE_TABLE } from './tables.js?v=202611241420';
 
 export const DEFAULT_TABLES = { V: RAW_TO_V, Q: RAW_TO_Q, general: GENERAL_TABLE, pct: PERCENTILE_TABLE };
 export const DEFAULT_LABEL = 'טבלה כללית (סתיו 2023)';

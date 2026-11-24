@@ -1,6 +1,6 @@
 // סימולטור פסיכומטרי — מעלה PDF של סימולציה, מציג פרק אחרי פרק עם זמן נעול, ומנקד לפי מפתח התשובות.
 import * as pdfjs from './vendor/pdf.min.js';
-import { extractTables, scoreFromRaw, validateVQ, DEFAULT_TABLES, DEFAULT_LABEL } from './scoring.js';
+import { extractTables, scoreFromRaw, validateVQ, DEFAULT_TABLES, DEFAULT_LABEL } from './scoring.js?v=202611241420';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.js', import.meta.url).href;
 
