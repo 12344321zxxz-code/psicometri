@@ -323,6 +323,7 @@ function render() {
   if (!state || state.phase === 'setup') return state ? renderSetup() : renderHome();
   if (state.phase === 'done') return renderReview();
   if (state.phase === 'entry') return renderEntry();
+  if (state.live) return renderLive();
   return renderExam();
 }
 
@@ -341,7 +342,7 @@ function renderHome() {
     <div id="err" class="error hidden"></div>
     ${hist.length ? `<h2>סימולציות קודמות</h2>
     <table class="hist"><thead><tr><th>תאריך</th><th>קובץ</th><th>V</th><th>Q</th><th>דו-תחומי</th><th></th></tr></thead><tbody>
-    ${hist.map((r, i) => `<tr><td>${new Date(r.finishedAt).toLocaleDateString('he-IL')}</td><td class="fname">${esc(r.exam)}${r.examLabel ? ' · ' + esc(r.examLabel) : ''}${r.paper ? ' <span class="tag">נייר</span>' : ''}${r.scores && (r.tableSource || 'general') === 'general' ? ' <span class="tag warn-tag" title="הציון חושב לפי טבלה כללית">טבלה כללית</span>' : ''}</td><td>${r.scores?.V ?? '—'}</td><td>${r.scores?.Q ?? '—'}</td><td>${r.scores?.two ? rng(r.scores.two.lo, r.scores.two.hi) : '—'}</td><td><button class="link" data-open="${i}">פתח מבחן</button> <button class="link" data-exp="${i}">ייצוא</button> <button class="link" data-recalc="${i}">טבלת ציון</button> <button class="link danger" data-del="${i}">מחק</button></td></tr>`).join('')}
+    ${hist.map((r, i) => `<tr><td>${new Date(r.finishedAt).toLocaleDateString('he-IL')}</td><td class="fname">${esc(r.exam)}${r.examLabel ? ' · ' + esc(r.examLabel) : ''}${r.paper ? ' <span class="tag">נייר</span>' : ''}${r.live ? ' <span class="tag">מודפס</span>' : ''}${r.scores && (r.tableSource || 'general') === 'general' ? ' <span class="tag warn-tag" title="הציון חושב לפי טבלה כללית">טבלה כללית</span>' : ''}</td><td>${r.scores?.V ?? '—'}</td><td>${r.scores?.Q ?? '—'}</td><td>${r.scores?.two ? rng(r.scores.two.lo, r.scores.two.hi) : '—'}</td><td><button class="link" data-open="${i}">פתח מבחן</button> <button class="link" data-exp="${i}">ייצוא</button> <button class="link" data-recalc="${i}">טבלת ציון</button> <button class="link danger" data-del="${i}">מחק</button></td></tr>`).join('')}
     </tbody></table>
     <button class="btn secondary" id="expAll">ייצוא כל התחקורים (JSON)</button>` : ''}
     <div class="row"><label class="btn secondary">ייבוא תחקור ישן (JSON)<input type="file" accept="application/json,.json" id="importJson" hidden></label>
@@ -456,6 +457,7 @@ function renderSetup() {
     </div>
     <div class="row">
       <button class="btn" id="start">התחל בחינה</button>
+      <button class="btn secondary" id="live">מבחן מודפס · טופס תשובות בזמן אמת</button>
       <button class="btn secondary" id="paper">הזן תשובות ממבחן על נייר</button>
       <button class="btn secondary" id="cancel">בטל וחזור</button>
     </div>
@@ -465,6 +467,12 @@ function renderSetup() {
   const ei = el.querySelector('[data-essay]'); if (ei) ei.onchange = () => { s.essay.minutes = Math.max(1, +ei.value || DEFAULT_ESSAY_MIN); save(); };
   el.querySelector('#cancel').onclick = async () => { await delPdf(s.id); state = null; localStorage.removeItem(STATE_KEY); render(); };
   el.querySelector('#editTable').onclick = () => openTableEditor(s, () => { save(); render(); });
+  el.querySelector('#live').onclick = () => {
+    s.live = true; s.announced = 0; s.entryCursor = { si: 0, q: 1 };
+    unlockAudio();
+    beginPhase(s.essay.pages.length ? -1 : 0, Date.now());
+    render();
+  };
   el.querySelector('#paper').onclick = () => { s.paper = true; s.phase = 'entry'; s.entryCursor = { si: 0, q: 1 }; save(); render(); };
   el.querySelector('#start').onclick = () => {
     const first = s.essay.pages.length ? -1 : 0;
@@ -705,7 +713,7 @@ function tick(booklet) {
   // count only time inside the phase; cap long gaps (laptop asleep) at a minute
   const d = Math.max(0, Math.min(now, state.phaseEnd) - lastTick);
   lastTick = now;
-  if (state.phase === 'section' && d > 0) {
+  if (state.phase === 'section' && d > 0 && !state.live) {
     const idx = state.current;
     const key = activeKey();
     const dd = Math.min(d, 65000);
@@ -717,15 +725,168 @@ function tick(booklet) {
   if (!state.warned && state.phaseEnd - now <= WARN_MS && state.phaseEnd - now > 0) {
     state.warned = true; save();
     toast('נותרו 5 דקות', 8000);
+    if (state.live) { beep('warn'); speak('נותרו חמש דקות'); }
   }
+  if (state.live) updateClock();
   if (now >= state.phaseEnd) {
     const wasEssay = state.phase === 'essay';
     endPhase(state.phaseEnd, 'time');
-    if (state.phase !== 'done') toast(wasEssay ? 'הזמן למטלת הכתיבה נגמר. עוברים לפרק הבא.' : 'הזמן נגמר. הפרק ננעל ועוברים לפרק הבא.', 5000);
+    if (state.phase !== 'done' && !state.live) toast(wasEssay ? 'הזמן למטלת הכתיבה נגמר. עוברים לפרק הבא.' : 'הזמן נגמר. הפרק ננעל ועוברים לפרק הבא.', 5000);
+    if (state.phase === 'done' && state.live) { beep('end'); speak('הבחינה הסתיימה'); }
     render();
     return;
   }
   if (now % 5000 < 600) save();
+}
+
+// ---------- printed exam, answer sheet filled in real time ----------
+let audioCtx = null, wakeLock = null;
+function unlockAudio() {
+  try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch {}
+  try { speechSynthesis.getVoices(); } catch {}
+}
+function beep(kind) {
+  if (!audioCtx) return;
+  try {
+    audioCtx.resume();
+    const tones = kind === 'section' ? [[880, 0], [880, 0.28], [1175, 0.56]] : kind === 'end' ? [[1175, 0], [880, 0.3], [660, 0.6]] : [[660, 0], [660, 0.25]];
+    for (const [f, t] of tones) {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.frequency.value = f; o.type = 'sine';
+      const t0 = audioCtx.currentTime + t;
+      g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.4, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
+      o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0 + 0.25);
+    }
+  } catch {}
+}
+function speak(text) {
+  try {
+    const voices = speechSynthesis.getVoices();
+    const he = voices.find(v => /^he|^iw/i.test(v.lang));
+    if (!he) return; // no Hebrew voice on this device: beep + flash only
+    const u = new SpeechSynthesisUtterance(text); u.lang = he.lang; u.voice = he;
+    setTimeout(() => speechSynthesis.speak(u), 900); // after the beep
+  } catch {}
+}
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && (!wakeLock || wakeLock.released)) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state && state.live && (state.phase === 'essay' || state.phase === 'section')) keepAwake(); });
+function flash(title, sub) {
+  const f = h(`<div class="flash"><div class="flash-title">${esc(title)}</div>${sub ? `<div class="flash-sub">${esc(sub)}</div>` : ''}</div>`);
+  document.body.appendChild(f);
+  f.onclick = () => f.remove();
+  setTimeout(() => f.remove(), 4500);
+}
+function phaseTitle(idx) { return idx === -1 ? 'מטלת כתיבה' : `פרק ${state.sections[idx].num} · ${domainName(state.sections[idx].domain)}`; }
+function updateClock() {
+  const c = document.getElementById('liveClock');
+  if (c) c.textContent = fmt(Math.max(0, state.phaseEnd - Date.now()));
+}
+
+function renderLive() {
+  const skipped = catchUp();
+  if (state.phase === 'done') { render(); return; }
+  const st = state;
+  document.body.classList.remove('in-exam');
+  const idx = st.current;
+  // announce a phase once (not again after a reload)
+  if ((st.announced || 0) < st.phases.length) {
+    st.announced = st.phases.length;
+    st.lastMarkAt = st.phaseStart;
+    if (idx >= 0) st.entryCursor = { si: idx, q: 1 };
+    save();
+    const title = idx === -1 ? 'מטלת כתיבה' : `פרק ${st.sections[idx].num} התחיל`;
+    const sub = idx === -1 ? `${st.essay.minutes} דקות` : `${domainName(st.sections[idx].domain)} · ${st.sections[idx].minutes} דקות`;
+    flash(title, sub); beep('section');
+    speak(idx === -1 ? 'מטלת הכתיבה התחילה' : `פרק ${st.sections[idx].num} התחיל, ${domainName(st.sections[idx].domain)}`);
+  }
+  if (skipped) toast(`${skipped} פרקים נגמרו בזמן שהדף לא היה פתוח.`, 7000);
+  keepAwake();
+  const cur = st.entryCursor || (st.entryCursor = { si: Math.max(0, idx), q: 1 });
+  const el = h(`<div class="page entry live">
+    <div class="livebar">
+      <div><div class="live-phase">${esc(phaseTitle(idx))}</div>
+      <div class="small muted">${idx === -1 ? 'כותבים במחברת. אפשר כבר לסמן בגיליון אם צריך.' : 'מסמנים כל תשובה ברגע שעונים עליה. הזמן לשאלה נמדד מהסימון הקודם.'}</div></div>
+      <div class="spacer"></div>
+      <span id="liveClock" class="live-clock ${st.showClock ? '' : 'hidden'}"></span>
+      <button class="link" id="clockBtn">${st.showClock ? 'הסתר שעון' : 'הצג שעון'}</button>
+      <button class="btn small" id="finish">${idx === -1 ? 'סיימתי, לפרק הראשון' : idx === st.sections.length - 1 ? 'סיום הבחינה' : 'סיום פרק'}</button>
+    </div>
+    ${st.sections.map((s, si) => `<section class="entry-sec ${si === idx ? 'now' : ''}">
+      <h2>פרק ${s.num} · ${domainName(s.domain)} ${si === idx ? '<span class="tag now-tag">עכשיו</span>' : ''} <span class="muted small" data-cnt="${si}"></span></h2>
+      <div class="sheet" style="--rows:${Math.ceil(s.count / 4)}">${Array.from({ length: s.count }, (_, k) => `<div class="srow" data-si="${si}" data-q="${k + 1}"><span class="sn">${k + 1}</span>${[1, 2, 3, 4].map(a => `<button data-a="${a}">${a}</button>`).join('')}</div>`).join('')}</div>
+    </section>`).join('')}
+  </div>`);
+  $app.innerHTML = ''; $app.appendChild(el);
+  updateClock();
+
+  const refresh = (scroll) => {
+    st.sections.forEach((s, si) => { el.querySelector(`[data-cnt="${si}"]`).textContent = `${Object.keys(st.answers[si] || {}).length}/${s.count}`; });
+    el.querySelectorAll('.srow').forEach(r => {
+      const si = +r.dataset.si, q = +r.dataset.q, a = (st.answers[si] || {})[q];
+      r.querySelectorAll('button').forEach(b => b.classList.toggle('on', +b.dataset.a === a));
+      const isCur = si === cur.si && q === cur.q;
+      r.classList.toggle('cur', isCur);
+      if (isCur && scroll) r.scrollIntoView({ block: 'nearest' });
+    });
+  };
+  const mark = (si, q, a) => {
+    const ans = st.answers[si] || (st.answers[si] = {});
+    const prev = ans[q] || null;
+    const now = Date.now();
+    if (a) {
+      ans[q] = a;
+      // time for this answer = time since the previous mark (or since the phase started)
+      const since = Math.max(0, Math.min(now - (st.lastMarkAt || st.phaseStart), 30 * 60000));
+      const qt = st.qtime[si] || (st.qtime[si] = {});
+      qt[q] = (qt[q] || 0) + since;
+      st.lastMarkAt = now;
+    } else delete ans[q];
+    st.log.push({ t: now, s: si, q, a: a || null, prev });
+    save();
+  };
+  const move = (d) => {
+    let { si, q } = cur; q += d;
+    if (q > st.sections[si].count) { if (si + 1 < st.sections.length) { si++; q = 1; } else q = st.sections[si].count; }
+    if (q < 1) { if (si > 0) { si--; q = st.sections[si].count; } else q = 1; }
+    cur.si = si; cur.q = q; save();
+  };
+  el.querySelectorAll('.srow').forEach(r => r.onclick = (e) => {
+    const si = +r.dataset.si, q = +r.dataset.q;
+    cur.si = si; cur.q = q;
+    const b = e.target.closest('button');
+    if (b) { const a = +b.dataset.a; mark(si, q, (st.answers[si] || {})[q] === a ? null : a); move(1); }
+    save(); refresh(false);
+  });
+  document.onkeydown = (e) => {
+    if (state !== st || !st.live || !(st.phase === 'essay' || st.phase === 'section')) { document.onkeydown = null; return; }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key;
+    if (/^[1-4]$/.test(k)) { mark(cur.si, cur.q, +k); move(1); }
+    else if (k === '0' || k === ' ') { mark(cur.si, cur.q, null); move(1); }
+    else if (k === 'Backspace') { move(-1); mark(cur.si, cur.q, null); }
+    else if (k === 'ArrowLeft' || k === 'ArrowDown') move(1);
+    else if (k === 'ArrowRight' || k === 'ArrowUp') move(-1);
+    else return;
+    e.preventDefault(); refresh(true);
+  };
+  el.querySelector('#clockBtn').onclick = () => { st.showClock = !st.showClock; save(); render(); };
+  const gen = renderGen;
+  el.querySelector('#finish').onclick = () => {
+    unlockAudio();
+    if (!confirm(idx === -1 ? 'לעבור לפרק הראשון?' : idx === st.sections.length - 1 ? 'לסיים את הבחינה?' : 'לסיים את הפרק ולעבור לבא?')) return;
+    if (gen !== renderGen || state.phase === 'done') return;
+    const now = Date.now();
+    if (now >= st.phaseEnd) endPhase(st.phaseEnd, 'time'); else endPhase(now, 'user');
+    if (st.phase === 'done') { document.onkeydown = null; beep('end'); }
+    render();
+  };
+  document.addEventListener('pointerdown', unlockAudio, { once: true });
+  lastTick = Date.now();
+  st.owner = TAB_ID; save();
+  tickTimer = setInterval(() => tick(null), 500);
+  refresh(true);
 }
 
 // ---------- answers from a paper exam ----------
@@ -826,8 +987,8 @@ function buildReport(st) {
         q, answer: ans[q] || null, correct, isCorrect: s.key ? (ans[q] || null) === correct : null,
         timeSec: st.paper ? null : Math.round((qt[q] || 0) / 1000),
         changes: Math.max(0, my.length - 1),
-        firstAnswerSec: my.length && ph ? Math.round((my[0].t - ph.start) / 1000) : null,
-        lastAnswerSec: my.length && ph ? Math.round((my[my.length - 1].t - ph.start) / 1000) : null,
+        firstAnswerSec: my.length && ph && my[0].t >= ph.start ? Math.round((my[0].t - ph.start) / 1000) : null,
+        lastAnswerSec: my.length && ph && my[my.length - 1].t >= ph.start ? Math.round((my[my.length - 1].t - ph.start) / 1000) : null,
         autoAssignedSec: Math.round(st.log.filter(e => e.s === i && e.type === 'auto' && e.key === String(q)).reduce((a, e) => a + e.ms, 0) / 1000),
       };
     });
@@ -837,14 +998,14 @@ function buildReport(st) {
       endedBy: ph ? ph.endedBy : null,
       passageTimeSec: Math.round((qt.passage || 0) / 1000),
       unassignedTimeSec: Math.round(((qt.none || 0) + (qt.other || 0)) / 1000),
-      timeMeasured: 'by-click',
+      timeMeasured: st.live ? 'by-mark' : 'by-click',
       correct: scores.per[i].correct, total: s.count, answered: scores.per[i].answered,
       questions: qs,
     };
   });
   const essayPh = st.phases.find(p => p.idx === -1);
   return {
-    exam: st.exam, paper: !!st.paper, startedAt: st.phases[0] ? new Date(st.phases[0].start).toISOString() : null, finishedAt: st.finishedAt,
+    exam: st.exam, paper: !!st.paper, live: !!st.live, startedAt: st.phases[0] ? new Date(st.phases[0].start).toISOString() : null, finishedAt: st.finishedAt,
     essay: essayPh ? { minutes: st.essay.minutes, timeUsedSec: essayPh.end ? Math.round((essayPh.end - essayPh.start) / 1000) : null } : null,
     scores: scores.complete ? { vRaw: scores.vRaw, qRaw: scores.qRaw, V: scores.V, Q: scores.Q, two: scores.two, verbalEmphasis: scores.verbalW, quantEmphasis: scores.quantW, percentBelow: scores.percentBelow, table: scores.table } : null,
     examLabel: st.examLabel || null, tableSource: tableInfo(st).source, tables: tablesFor(st),

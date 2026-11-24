@@ -174,3 +174,15 @@ body.in-exam { overflow: hidden; background: #e9e9e6; }
 .paste textarea { width: 100%; font-family: monospace; }
 .warn-tag { background: #fde8e6; color: var(--bad); }
 .tablesrc { margin: 6px 0; }
+
+/* ----- printed exam, live answer sheet ----- */
+.livebar { position: sticky; top: 0; z-index: 5; background: var(--bg); display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.livebar .spacer { flex: 1; }
+.live-phase { font-size: 20px; font-weight: bold; }
+.live-clock { font-size: 22px; font-weight: bold; font-variant-numeric: tabular-nums; direction: ltr; }
+.entry-sec.now .sheet { border: 2px solid var(--accent); }
+.now-tag { background: var(--accent-soft); color: var(--accent); }
+.flash { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; background: var(--accent); animation: flashbg 0.5s ease-in-out 4 alternate; cursor: pointer; }
+.flash-title { font-size: 56px; font-weight: bold; }
+.flash-sub { font-size: 24px; margin-top: 10px; opacity: .9; }
+@keyframes flashbg { from { background: var(--accent); } to { background: #0d2747; } }
