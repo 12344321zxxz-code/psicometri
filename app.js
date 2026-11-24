@@ -21,6 +21,7 @@ let renderGen = 0;    // bumps on every screen change, so stale async page rende
 let busy = false;     // a file is being processed
 let revisit = null;   // review-mode view: { rep, layout, doc, si, back }
 let historyView = null; // results screen of a saved simulation: { id }
+let homeView = false;   // show the home page (history) while the last finished simulation is still open
 let lockedOut = false; // the exam was changed from another tab
 const TAB_ID = Math.random().toString(36).slice(2);
 const safeName = (s) => String(s).replace(/[\\/:*?"<>|]+/g, '_').slice(0, 60);
@@ -322,6 +323,7 @@ function render() {
   document.body.classList.remove('in-exam');
   if (revisit) return renderRevisit();
   if (historyView) return renderHistoryResults();
+  if (homeView && state && state.phase === 'done') return renderHome();
   if (!state || state.phase === 'setup') return state ? renderSetup() : renderHome();
   if (state.phase === 'done') return renderReview();
   if (state.phase === 'entry') return renderEntry();
@@ -334,6 +336,7 @@ function renderHome() {
   const el = h(`
   <div class="page home">
     <h1>סימולטור פסיכומטרי</h1>
+    ${state && state.phase === 'done' ? `<div class="row"><button class="btn small secondary" id="backReview">→ חזרה לתחקור של ${esc(state.exam)}</button></div>` : ''}
     <p class="muted">מעלים את קובץ הסימולציה (PDF). האתר מחלק אותו לפרקים, מציג אותם לפי הסדר עם זמן נעול, ובסוף מנקד לפי מפתח התשובות.</p>
     <label class="drop" id="drop">
       <input type="file" accept="application/pdf" id="file" hidden>
@@ -351,6 +354,8 @@ function renderHome() {
     <span class="small muted">מוסיף את התחקור להיסטוריה ומחשב אותו מחדש לפי טבלת המבחן שלו.</span></div>
   </div>`);
   $app.innerHTML = ''; $app.appendChild(el);
+  const br = el.querySelector('#backReview');
+  if (br) br.onclick = () => { homeView = false; render(); };
   const input = el.querySelector('#file');
   input.onchange = () => { const f = input.files[0]; input.value = ''; if (f) startUpload(f); };
   const drop = el.querySelector('#drop');
@@ -416,6 +421,7 @@ async function startUpload(file) {
       phase: 'setup', current: null, phaseStart: 0, phaseEnd: 0, warned: false,
       answers: {}, log: [], qtime: {}, phases: [],
     };
+    homeView = false;
     save(); render();
   } catch (e) {
     console.error(e);
@@ -1103,6 +1109,7 @@ function renderReview() {
       <button class="btn secondary" id="expCsv">ייצוא לטבלה (CSV)</button>
       <button class="btn secondary" id="copy">העתק סיכום</button>
       <button class="btn secondary" id="newExam">סימולציה חדשה</button>
+      <button class="btn secondary" id="goHome">היסטוריה</button>
     </div>`;
   const paper = !!st.paper;
   html += sectionsBlock(rep, paper, st.sections.map(x => x.inlineOk));
@@ -1116,6 +1123,7 @@ function renderReview() {
     if (!confirm('להתחיל סימולציה חדשה? התחקור הזה כבר שמור בהיסטוריה.')) return;
     state = null; localStorage.removeItem(STATE_KEY); pdfDoc = null; render(); // the PDF stays saved, for reopening from history
   };
+  el.querySelector('#goHome').onclick = () => { homeView = true; render(); };
   const et = el.querySelector('#editTable');
   if (et) et.onclick = () => openTableEditor(st, () => { save(); archive(); render(); });
   const ea = el.querySelector('#editAns');
